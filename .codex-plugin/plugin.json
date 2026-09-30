@@ -1,0 +1,25 @@
+{
+  "name": "iana-registries-mcp-server",
+  "version": "0.1.0",
+  "description": "IANA protocol registries and IETF Datatracker lookups: ports, media types, HTTP status codes and headers, URI schemes, PENs, language subtags, and RFC status.",
+  "author": {
+    "name": "cyanheads",
+    "email": "casey@caseyjhand.com",
+    "url": "https://github.com/cyanheads"
+  },
+  "homepage": "https://github.com/cyanheads/iana-registries-mcp-server#readme",
+  "repository": "https://github.com/cyanheads/iana-registries-mcp-server",
+  "license": "Apache-2.0",
+  "keywords": ["mcp", "mcp-server", "model-context-protocol", "iana", "ietf", "rfc", "protocol-registries"],
+  "mcpServers": "./.codex-plugin/mcp.json",
+  "interface": {
+    "displayName": "iana-registries-mcp-server",
+    "shortDescription": "Look up IANA registry assignments and RFC status.",
+    "longDescription": "Query the authoritative Internet protocol parameter registries maintained by IANA, plus RFC and Internet-Draft status from the IETF. Resolve TCP/UDP port assignments, MIME media types, HTTP status codes and header fields, URI schemes, Private Enterprise Numbers, and BCP 47 language subtags, and check whether an RFC has been obsoleted or updated. All sources are keyless public registries.",
+    "developerName": "cyanheads",
+    "category": "Developer Tools",
+    "capabilities": ["Read"],
+    "websiteURL": "https://github.com/cyanheads/iana-registries-mcp-server",
+    "defaultPrompt": []
+  }
+}

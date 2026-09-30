@@ -1,0 +1,9 @@
+{
+  "iana-registries-mcp-server": {
+    "command": "npx",
+    "args": ["-y", "@cyanheads/iana-registries-mcp-server"],
+    "env": {
+      "MCP_TRANSPORT_TYPE": "stdio"
+    }
+  }
+}

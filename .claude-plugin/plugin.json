@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "iana-registries-mcp-server",
+  "version": "0.1.0",
+  "description": "IANA protocol registries and IETF Datatracker lookups: ports, media types, HTTP status codes and headers, URI schemes, PENs, language subtags, and RFC status.",
+  "author": {
+    "name": "cyanheads",
+    "email": "casey@caseyjhand.com",
+    "url": "https://github.com/cyanheads"
+  },
+  "homepage": "https://github.com/cyanheads/iana-registries-mcp-server#readme",
+  "repository": "https://github.com/cyanheads/iana-registries-mcp-server",
+  "license": "Apache-2.0",
+  "keywords": ["mcp", "mcp-server", "model-context-protocol", "iana", "ietf", "rfc", "protocol-registries"],
+  "mcpServers": {
+    "iana-registries-mcp-server": {
+      "command": "npx",
+      "args": ["-y", "@cyanheads/iana-registries-mcp-server"],
+      "env": {
+        "MCP_TRANSPORT_TYPE": "stdio"
+      }
+    }
+  }
+}
