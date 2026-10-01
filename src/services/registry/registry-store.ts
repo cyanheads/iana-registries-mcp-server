@@ -61,6 +61,8 @@ export const STALE_MAX_MS = 7 * 24 * HOUR_MS;
 export const HOLD_MS = 2 * 60_000;
 /** Deadline of one shared load, independent of any caller's budget. */
 export const LOAD_DEADLINE_MS = 40_000;
+/** A generic registry id IANA answered 404 for is not fetched again for this long. */
+export const MISSING_MS = 15 * 60_000;
 /** Generic (non-curated) XML registries held at once. */
 export const GENERIC_MAX_ENTRIES = 24;
 /** Combined decoded source bytes of the generic registries held at once. */
@@ -167,6 +169,11 @@ export class RegistryStore implements Disposable {
   readonly #curated: Readonly<Record<CuratedRegistryId, Slot<XmlRegistry>>>;
   /** Insertion order is recency order: the last entry is the most recently used. */
   readonly #generic = new Map<string, Slot<XmlRegistry>>();
+  /**
+   * Generic ids IANA answered 404 for → store-clock time the memory ends. Every
+   * entry lives {@link MISSING_MS}, so insertion order is expiry order.
+   */
+  readonly #missing = new Map<string, number>();
   readonly #pen: Slot<PenRegistry>;
   readonly #language: Slot<LanguageRegistry>;
   readonly #index: Slot<ProtocolIndex>;
@@ -231,10 +238,13 @@ export class RegistryStore implements Disposable {
 
   /**
    * Any XML registry by exact (case-sensitive) id. `undefined` when IANA answers
-   * 404. A curated id reads the pinned model; any other id goes through the LRU.
+   * 404, which is remembered for {@link MISSING_MS}: the id is not fetched again
+   * until then. A curated id reads the pinned model; any other id goes through
+   * the LRU.
    */
   async findRegistry(id: string, budget: CallBudget): Promise<Loaded<XmlRegistry> | undefined> {
     if (isCuratedRegistryId(id)) return this.getRegistry(id, budget);
+    if (this.#isMissing(id)) return;
 
     let generic = this.#generic.get(id);
     if (generic) this.#generic.delete(id);
@@ -245,6 +255,7 @@ export class RegistryStore implements Disposable {
     this.#generic.set(id, generic);
 
     const loaded = await this.#read(generic, budget);
+    if (!loaded) this.#rememberMissing(id);
     if (!(loaded || generic.entry) && this.#generic.get(id) === generic) this.#generic.delete(id);
     this.#evict();
     return loaded;
@@ -273,6 +284,26 @@ export class RegistryStore implements Disposable {
   cachedIndex(): ProtocolIndex | undefined {
     const { entry } = this.#index;
     return entry && this.#now() - entry.fetchedAt <= this.#staleMaxMs ? entry.model : undefined;
+  }
+
+  /** True while `id`'s 404 is remembered; an expired memory is dropped. */
+  #isMissing(id: string): boolean {
+    const until = this.#missing.get(id);
+    if (until === undefined) return false;
+    if (this.#now() < until) return true;
+    this.#missing.delete(id);
+    return false;
+  }
+
+  /** Remembers `id`'s 404 and drops expired memories (oldest first, since every entry lives the same time). */
+  #rememberMissing(id: string): void {
+    const now = this.#now();
+    this.#missing.delete(id);
+    this.#missing.set(id, now + MISSING_MS);
+    for (const [key, until] of this.#missing) {
+      if (until > now) break;
+      this.#missing.delete(key);
+    }
   }
 
   /** Aborts every shared load in flight. Called from `createApp({ teardown })`. */

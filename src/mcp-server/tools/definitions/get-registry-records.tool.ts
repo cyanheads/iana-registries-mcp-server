@@ -50,11 +50,14 @@ const REGISTRY_INPUT =
 const REGISTRY_URL =
   /^https?:\/\/(?:www\.)?iana\.org\/assignments\/([A-Za-z0-9_][A-Za-z0-9_.-]{0,63})(?:\/[^\s#]*)?(?:#([A-Za-z0-9_][A-Za-z0-9_.-]{0,99}))?$/;
 
-/** Ids IANA publishes only as plain text, each read by a curated tool. */
-const PLAIN_TEXT_REGISTRIES: Readonly<Record<string, { file: string; tool: string }>> = {
-  'enterprise-numbers': { file: PEN_URL, tool: 'iana_lookup_pen' },
-  'language-subtag-registry': { file: LANGUAGE_REGISTRY_URL, tool: 'iana_lookup_language_tag' },
-};
+/** Ids IANA publishes only as plain text, each read by a curated tool. A `Map`, so a caller's id never reaches an object prototype. */
+const PLAIN_TEXT_REGISTRIES: ReadonlyMap<string, { file: string; tool: string }> = new Map([
+  ['enterprise-numbers', { file: PEN_URL, tool: 'iana_lookup_pen' }],
+  ['language-subtag-registry', { file: LANGUAGE_REGISTRY_URL, tool: 'iana_lookup_language_tag' }],
+]);
+
+/** The registry date a cursor may carry; any other `u` is ignored. */
+const CURSOR_DATE = /^\d{4}-\d{2}-\d{2}$/;
 
 /** Serialized `records` array ceiling per page. */
 const RECORDS_BUDGET = 48_000;
@@ -153,6 +156,10 @@ function isInvalidCursor(error: unknown): boolean {
     (error.data as { reason?: unknown } | undefined)?.reason === 'invalid_cursor'
   );
 }
+
+/** A cursor offset or limit this tool could have minted: a non-negative safe integer. */
+const isCount = (value: unknown): value is number =>
+  Number.isSafeInteger(value) && (value as number) >= 0;
 
 /** Short FNV-1a fingerprint of the filters a cursor belongs to. */
 function filterKey(parts: readonly string[]): string {
@@ -368,7 +375,7 @@ export const getRegistryRecords = tool('iana_get_registry_records', {
     {
       reason: 'invalid_cursor',
       code: JsonRpcErrorCode.InvalidParams,
-      when: 'The cursor is not one this tool returned: malformed, corrupted, or carrying an invalid offset.',
+      when: 'The cursor is not one this tool returned: malformed, corrupted, or carrying an offset or limit that is not a whole number of zero or more.',
       recovery:
         'Pass the next_cursor value from the previous response unchanged, or omit cursor to start over.',
       severity: 'notice',
@@ -409,6 +416,8 @@ export const getRegistryRecords = tool('iana_get_registry_records', {
         cursor = decodeCursor(input.cursor, ctx);
       } catch (error) {
         if (!isInvalidCursor(error)) throw error;
+      }
+      if (!(cursor && isCount(cursor.offset) && isCount(cursor.limit))) {
         throw ctx.fail(
           'invalid_cursor',
           'The cursor is expired, corrupted, or not one this tool returned.',
@@ -416,7 +425,7 @@ export const getRegistryRecords = tool('iana_get_registry_records', {
       }
     }
 
-    const plain = PLAIN_TEXT_REGISTRIES[target.id.toLowerCase()];
+    const plain = PLAIN_TEXT_REGISTRIES.get(target.id.toLowerCase());
     if (plain) {
       throw ctx.fail(
         'non_xml_registry',
@@ -578,7 +587,8 @@ export const getRegistryRecords = tool('iana_get_registry_records', {
       input.value === undefined
         ? 'Try fewer or different words.'
         : `Drop ${input.contains === undefined ? 'value' : 'a filter'}, or check the column names listed in columns.`;
-    const mintedFor = typeof cursor?.u === 'string' ? cursor.u : undefined;
+    const mintedFor =
+      typeof cursor?.u === 'string' && CURSOR_DATE.test(cursor.u) ? cursor.u : undefined;
     discloseList(ctx.enrich, {
       total: matches.length,
       shown: records.length,

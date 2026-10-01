@@ -89,6 +89,21 @@ describe('parseProtocolIndex', () => {
     expect(parseProtocolIndex(page).entries[0]?.title).toBe('Bold & © x');
   });
 
+  it('keeps an entity named after an object member as written, in titles, categories, and procedures', () => {
+    const page = indexPage(
+      categoryRow('Group &constructor;'),
+      entryRow({
+        href: '/assignments/a',
+        title: 'A &constructor; &CONSTRUCTOR; &__proto__; &tostring;',
+        procedure: 'Expert &constructor; Review',
+      }),
+    );
+    const [entry] = parseProtocolIndex(page).entries;
+    expect(entry?.title).toBe('A &constructor; &CONSTRUCTOR; &__proto__; &tostring;');
+    expect(entry?.category).toBe('Group &constructor;');
+    expect(entry?.registrationProcedure).toBe('Expert &constructor; Review');
+  });
+
   it('reads defining documents with id, entity-decoded title and an iana.org URL for site-relative links', () => {
     expect(byTitle('Example Parameters')?.definingDocuments).toEqual([
       { id: 'RFC9999', title: 'The Example & Spec', url: 'https://www.iana.org/go/rfc9999' },

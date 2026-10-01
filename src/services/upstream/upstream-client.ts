@@ -2,12 +2,18 @@
  * @fileoverview Plain-fetch boundary for the three keyless upstreams (IANA, RFC
  * Editor, IETF Datatracker): per-host pacers, status accept-lists, content-type
  * checks, byte-ceiling body reads, a per-attempt timer, and the retry ladder
- * bounded by the caller's {@link CallBudget}. 304 and 404 are results here, not
- * errors, which is why it calls `fetch` directly instead of `fetchWithTimeout`.
+ * bounded by the caller's {@link CallBudget} and its per-host request
+ * allowance. 304 and 404 are results here, not errors, which is why it calls
+ * `fetch` directly instead of `fetchWithTimeout`.
  * @module services/upstream/upstream-client
  */
 
-import { internalError, serviceUnavailable, timeout } from '@cyanheads/mcp-ts-core/errors';
+import {
+  internalError,
+  rateLimited,
+  serviceUnavailable,
+  timeout,
+} from '@cyanheads/mcp-ts-core/errors';
 import {
   createPacer,
   httpErrorFromResponse,
@@ -84,6 +90,15 @@ const HOSTS: Readonly<Record<string, UpstreamHost>> = {
   'datatracker.ietf.org': 'datatracker',
 };
 
+/** Datatracker requests this server starts per minute, across every client. */
+const DATATRACKER_PER_MINUTE = 60;
+
+/**
+ * The most Datatracker requests one tool call may start, retries included: a
+ * third of the host's per-minute pacing, so one call cannot take most of it.
+ */
+export const DATATRACKER_CALL_REQUESTS = DATATRACKER_PER_MINUTE / 3;
+
 /** Self-imposed pacing; none of the upstreams publishes a rate limit. */
 export const DEFAULT_PACING: Readonly<Record<UpstreamHost, PacerOptions>> = {
   iana: {
@@ -103,7 +118,7 @@ export const DEFAULT_PACING: Readonly<Record<UpstreamHost, PacerOptions>> = {
     name: 'datatracker',
     maxConcurrent: 2,
     minStartGapMs: 250,
-    limits: [{ requests: 60, perMs: 60_000 }],
+    limits: [{ requests: DATATRACKER_PER_MINUTE, perMs: 60_000 }],
   },
 };
 
@@ -165,8 +180,11 @@ export class UpstreamClient implements Disposable {
    * One paced, retried read inside the caller's budget:
    * `withRetry(attempt => pacer.run(() => get + parse))`. Pacer queue time, every
    * attempt, and every backoff draw on `budget`; expiry is a `Timeout` with
-   * `reason: 'retry_deadline_exceeded'`, a full host queue is `pacer_shed`. Every
-   * failure, an unconfigured host included, is a rejection.
+   * `reason: 'retry_deadline_exceeded'`, a full host queue is `pacer_shed`. Each
+   * attempt takes one request from the budget's allowance for the host before it
+   * queues; with none left the read fails `RateLimited` with
+   * `reason: 'request_limit'`, unretried. Every failure, an unconfigured host
+   * included, is a rejection.
    */
   async request<T>(url: string, options: RequestOptions<T>): Promise<T> {
     const { budget, parse, profile: profileName, operation, ...get } = options;
@@ -177,8 +195,9 @@ export class UpstreamClient implements Disposable {
     if (remaining <= 0) throw budgetExceeded(budget, operation);
 
     return await withRetry(
-      (attempt) =>
-        pacer.run(
+      (attempt) => {
+        takeRequest(budget, host, url, operation);
+        return pacer.run(
           async (signal) =>
             parse(
               await this.get(url, {
@@ -191,7 +210,8 @@ export class UpstreamClient implements Disposable {
             signal: attempt.signal,
             maxWaitMs: Math.min(PACER_MAX_WAIT_MS, attempt.remainingMs),
           },
-        ),
+        );
+      },
       {
         operation,
         context: budget.context,
@@ -302,6 +322,25 @@ function hostOf(url: string): UpstreamHost {
   const host = HOSTS[new URL(url).hostname];
   if (!host) throw internalError(`No pacer is configured for ${new URL(url).hostname}.`);
   return host;
+}
+
+/**
+ * Takes one request for `host` from the budget's allowance, or throws
+ * `request_limit` when none is left. `retryable: false` keeps `withRetry` from
+ * re-attempting: within this call, no later attempt would be allowed either.
+ */
+function takeRequest(budget: CallBudget, host: UpstreamHost, url: string, operation: string) {
+  const { requests } = budget;
+  const left = requests?.[host];
+  if (requests === undefined || left === undefined) return;
+  if (left <= 0) {
+    const hostname = new URL(url).hostname;
+    throw rateLimited(
+      `${operation} was not sent: this call has started every request to ${hostname} it may.`,
+      { reason: 'request_limit', host: hostname, retryable: false },
+    );
+  }
+  requests[host] = left - 1;
 }
 
 /** Releases an unread body so the connection returns to the pool. */

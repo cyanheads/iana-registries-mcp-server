@@ -2,6 +2,7 @@
  * @fileoverview Tests for `RegistryStore`: first load and source provenance,
  * the 24 h cache with conditional revalidation, the stale serve and the 2-minute
  * hold after a failed refresh, shared loads on the server-scoped signal, the
+ * 15-minute memory of a generic id IANA answered 404 for, the
  * generic-registry eviction rule, and the PEN, language-registry and
  * protocol-index sources. Upstream I/O is a `createFetchMock` fake; the store
  * clock is manual, retry timers run on fake timers.
@@ -18,6 +19,7 @@ import {
   isCuratedRegistryId,
   LANGUAGE_REGISTRY_URL,
   LOAD_DEADLINE_MS,
+  MISSING_MS,
   PEN_URL,
   PROTOCOL_INDEX_URL,
   RegistryStore,
@@ -121,6 +123,7 @@ describe('constants and helpers', () => {
     expect(STALE_MAX_MS).toBe(7 * 24 * 3_600_000);
     expect(HOLD_MS).toBe(120_000);
     expect(LOAD_DEADLINE_MS).toBe(40_000);
+    expect(MISSING_MS).toBe(15 * 60_000);
     expect(GENERIC_MAX_ENTRIES).toBe(24);
     expect(GENERIC_MAX_BYTES).toBe(8 * MiB);
   });
@@ -336,20 +339,49 @@ describe('findRegistry (generic registries)', () => {
     });
   });
 
-  it('returns undefined for a 404 and does not cache it', async () => {
+  it('returns undefined for a 404 and remembers it for 15 minutes: two calls make one fetch', async () => {
     const s = setup();
     s.state.answer = () => statusResponse(404, {}, 'Page not found');
     expect(await s.store.findRegistry('no-such-registry', s.budget())).toBeUndefined();
     expect(await s.store.findRegistry('no-such-registry', s.budget())).toBeUndefined();
+    expect(s.fetches()).toBe(1);
+    s.advance(MISSING_MS - 1);
+    expect(await s.store.findRegistry('no-such-registry', s.budget())).toBeUndefined();
+    expect(s.fetches()).toBe(1);
+    s.advance(1);
+    expect(await s.store.findRegistry('no-such-registry', s.budget())).toBeUndefined();
     expect(s.fetches()).toBe(2);
   });
 
-  it('a 404 starts no hold and does not disturb a later success for the same id', async () => {
+  it('remembers each 404 under its own id', async () => {
+    const s = setup();
+    s.state.answer = () => statusResponse(404);
+    await s.store.findRegistry('missing-a', s.budget());
+    await s.store.findRegistry('missing-b', s.budget());
+    await s.store.findRegistry('missing-a', s.budget());
+    expect(s.urls()).toEqual([registryXmlUrl('missing-a'), registryXmlUrl('missing-b')]);
+  });
+
+  it('a 404 starts no hold, and an id IANA adds later reads once the 404 window has passed', async () => {
     const s = setup();
     s.state.answer = () => statusResponse(404);
     await s.store.findRegistry('later-added', s.budget());
     s.state.answer = () => xmlResponse(curatedXml('later-added'));
+    expect(await s.store.findRegistry('later-added', s.budget())).toBeUndefined();
+    s.advance(MISSING_MS);
     expect((await s.store.findRegistry('later-added', s.budget()))?.model.id).toBe('later-added');
+    expect(s.fetches()).toBe(2);
+  });
+
+  it('remembers a cached registry that a revalidation finds removed', async () => {
+    const s = setup();
+    s.state.answer = () => xmlResponse(NESTED_XML);
+    expect(await s.store.findRegistry('example-parameters', s.budget())).toBeDefined();
+    s.advance(FRESH_MS);
+    s.state.answer = () => statusResponse(404);
+    expect(await s.store.findRegistry('example-parameters', s.budget())).toBeUndefined();
+    expect(await s.store.findRegistry('example-parameters', s.budget())).toBeUndefined();
+    expect(s.fetches()).toBe(2);
   });
 
   it('is case-sensitive: the id goes to IANA exactly as given', async () => {

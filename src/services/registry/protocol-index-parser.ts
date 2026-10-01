@@ -30,15 +30,16 @@ const EXPERT_SPAN = /<span\b[^>]*\bclass="reg-expert"[^>]*>[\s\S]*?<\/span>/g;
 const COMMENT_SPAN = /<span class="iana-protocol-comment">([\s\S]*?)<\/span>/g;
 const ATTRIBUTE = /([A-Za-z_:][-A-Za-z0-9_:.]*)\s*=\s*(?:"([^"]*)"|'([^']*)')/g;
 
-const NAMED_ENTITIES: Readonly<Record<string, string>> = {
-  amp: '&',
-  lt: '<',
-  gt: '>',
-  quot: '"',
-  apos: "'",
-  nbsp: ' ',
-  times: '×',
-};
+/** A `Map`, so an entity named after an object member (`&constructor;`) stays as written. */
+const NAMED_ENTITIES: ReadonlyMap<string, string> = new Map([
+  ['amp', '&'],
+  ['lt', '<'],
+  ['gt', '>'],
+  ['quot', '"'],
+  ['apos', "'"],
+  ['nbsp', ' '],
+  ['times', '×'],
+]);
 
 function decodeEntities(text: string): string {
   return text.replace(/&(#x[0-9a-f]+|#\d+|[a-z]+);/gi, (match, entity: string) => {
@@ -51,7 +52,7 @@ function decodeEntities(text: string): string {
         ? String.fromCodePoint(code)
         : match;
     }
-    return NAMED_ENTITIES[entity.toLowerCase()] ?? match;
+    return NAMED_ENTITIES.get(entity.toLowerCase()) ?? match;
   });
 }
 

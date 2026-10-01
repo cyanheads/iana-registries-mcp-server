@@ -2,24 +2,29 @@
  * @fileoverview `iana_get_rfc_status` — current status and relations of up to
  * 10 RFCs or Internet-Drafts per call, from the RFC Editor and the IETF
  * Datatracker. Each id is classified and resolved on its own, so one bad id
- * never fails the batch: a miss is `found: false` with guidance, an upstream
- * failure lands in `failed[]`, and the call fails only when every id failed
- * upstream.
+ * never fails the batch: a miss is `found: false` with guidance; an upstream
+ * failure, or an id left unresolved when the call reaches its Datatracker
+ * request limit, lands in `failed[]`; and the call fails only when every id
+ * failed.
  * @module mcp-server/tools/definitions/get-rfc-status
  */
 
 import { type Context, tool, z } from '@cyanheads/mcp-ts-core';
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import {
   datatrackerPageUrl,
   getIetfDocService,
   rfcPageUrl,
 } from '@/services/ietf/ietf-doc-service.js';
 import { type CallBudget, startCallBudget } from '@/services/upstream/call-budget.js';
+import { DATATRACKER_CALL_REQUESTS } from '@/services/upstream/upstream-client.js';
 import { inline, url } from '../shared/markdown.js';
 
 /** Most ids one call resolves. */
 const MAX_IDS = 10;
+
+/** The `failed[].error` of an id the call's Datatracker request limit left unresolved. */
+const REQUEST_LIMIT_MESSAGE = `Not resolved: this call reached its limit of ${DATATRACKER_CALL_REQUESTS} Datatracker requests first. Call iana_get_rfc_status again with this id.`;
 
 /**
  * `ids` preprocess: one string splits on commas, semicolons, and newlines (a
@@ -280,6 +285,12 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+/** The `data.reason` of a classified failure, when it carries one. */
+function reasonOf(error: unknown): string | undefined {
+  const reason = error instanceof McpError ? error.data?.reason : undefined;
+  return typeof reason === 'string' ? reason : undefined;
+}
+
 /** `none`, or the items joined, each made safe for one markdown line. */
 function list(items: readonly string[], separator = ', '): string {
   return items.length > 0 ? items.map(inline).join(separator) : 'none';
@@ -291,8 +302,7 @@ function groupText(group: z.infer<typeof GroupSchema>): string {
 
 export const getRfcStatus = tool('iana_get_rfc_status', {
   title: 'Get RFC and Internet-Draft status',
-  description:
-    'Get the current status of up to 10 RFCs or Internet-Drafts in one call. Accepts "RFC 9110", "rfc9110", "9110", RFC Editor or Datatracker URLs, and draft names with or without a revision suffix ("draft-ietf-httpbis-semantics-19"). RFCs return current and as-published status, stream, working group, obsoletes/obsoleted-by and updates/updated-by relations, and the errata page; drafts return their state, IESG state, intended status, expiry, the document that replaced them, and the RFC they became. Unknown ids return found: false. BCP, STD, and FYI numbers are not resolved.',
+  description: `Get the current status of up to 10 RFCs or Internet-Drafts in one call. Accepts "RFC 9110", "rfc9110", "9110", RFC Editor or Datatracker URLs, and draft names with or without a revision suffix ("draft-ietf-httpbis-semantics-19"). RFCs return current and as-published status, stream, working group, obsoletes/obsoleted-by and updates/updated-by relations, and the errata page; drafts return their state, IESG state, intended status, expiry, the document that replaced them, and the RFC they became. Unknown ids return found: false. BCP, STD, and FYI numbers are not resolved. A call makes at most ${DATATRACKER_CALL_REQUESTS} Datatracker requests, retries included (an RFC needs one, a draft three, or four with a revision suffix); ids past that come back in failed with reason request_limit, so split more than five drafts across calls.`,
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
     ids: z
@@ -346,17 +356,27 @@ export const getRfcStatus = tool('iana_get_rfc_status', {
         z
           .object({
             id: z.string().describe('The document whose lookup failed.'),
-            error: z.string().describe('What failed upstream; retry later.'),
+            error: z.string().describe('What failed.'),
+            reason: z
+              .string()
+              .optional()
+              .describe(
+                'Failure reason, when classified: "request_limit" (call again with this id now), or an upstream one such as "upstream_unreadable" (retry later).',
+              ),
           })
           .describe('One failed id.'),
       )
-      .describe('Ids whose lookup failed upstream; the rest of the batch still answered.'),
+      .describe(
+        "Ids whose lookup failed upstream or was cut by the call's request limit; the rest of the batch still answered.",
+      ),
   }),
   enrichment: {
     notice: z
       .string()
       .optional()
-      .describe('Set when Datatracker fields (stream, group) were unavailable for some RFCs.'),
+      .describe(
+        "Set when ids were left unresolved at the call's Datatracker request limit, or when Datatracker fields (stream, group) were unavailable for some RFCs.",
+      ),
   },
   errors: [
     {
@@ -376,10 +396,17 @@ export const getRfcStatus = tool('iana_get_rfc_status', {
       retryable: true,
       thrownBy: 'service',
     },
+    {
+      reason: 'request_limit',
+      code: JsonRpcErrorCode.RateLimited,
+      when: `The call reached its limit of ${DATATRACKER_CALL_REQUESTS} Datatracker requests, a third of this server's per-minute Datatracker pacing, before every id was resolved. The ids left over land in failed with this reason; the call itself fails with it only when no id resolved.`,
+      recovery: 'Call iana_get_rfc_status again with just the ids that failed with request_limit.',
+      retryable: true,
+    },
   ],
 
   async handler(input, ctx) {
-    const budget = startCallBudget(ctx);
+    const budget = startCallBudget(ctx, { datatracker: DATATRACKER_CALL_REQUESTS });
     const seen = new Set<string>();
     const requests = input.ids.map(classify).filter((requested) => {
       const key = `${requested.kind}:${requested.id.toLowerCase()}`;
@@ -393,14 +420,21 @@ export const getRfcStatus = tool('iana_get_rfc_status', {
         try {
           return { requested, resolved: await resolve(requested, budget, ctx) };
         } catch (error) {
-          return { requested, error };
+          return {
+            requested,
+            error:
+              reasonOf(error) === 'request_limit'
+                ? ctx.fail('request_limit', REQUEST_LIMIT_MESSAGE)
+                : error,
+          };
         }
       }),
     );
     ctx.signal.throwIfAborted();
 
     const documents: RfcDocument[] = [];
-    const failed: { error: string; id: string }[] = [];
+    const failed: { error: string; id: string; reason?: string }[] = [];
+    const cut: string[] = [];
     const trackingUnavailable: string[] = [];
     for (const outcome of outcomes) {
       if ('resolved' in outcome) {
@@ -408,18 +442,26 @@ export const getRfcStatus = tool('iana_get_rfc_status', {
         if (outcome.resolved.trackingUnavailable) trackingUnavailable.push(outcome.requested.id);
         continue;
       }
-      const failure = { id: outcome.requested.id, error: errorMessage(outcome.error) };
+      const reason = reasonOf(outcome.error);
+      const failure = {
+        id: outcome.requested.id,
+        error: errorMessage(outcome.error),
+        ...(reason ? { reason } : {}),
+      };
       ctx.log.warning('Document status lookup failed', failure);
       failed.push(failure);
+      if (reason === 'request_limit') cut.push(failure.id);
     }
 
     const firstFailure = outcomes.find((outcome) => 'error' in outcome);
     if (documents.length === 0 && firstFailure && 'error' in firstFailure) throw firstFailure.error;
-    if (trackingUnavailable.length > 0) {
-      ctx.enrich.notice(
+    const notice = [
+      cut.length > 0 &&
+        `${cut.join(', ')} ${cut.length === 1 ? 'was' : 'were'} not resolved within this call's limit of ${DATATRACKER_CALL_REQUESTS} Datatracker requests; call iana_get_rfc_status again with ${cut.length === 1 ? 'it' : 'them'}.`,
+      trackingUnavailable.length > 0 &&
         `Stream and working group were unavailable for ${trackingUnavailable.join(', ')}; status and relations come from the RFC Editor.`,
-      );
-    }
+    ].filter(Boolean);
+    if (notice.length > 0) ctx.enrich.notice(notice.join(' '));
     return { documents, failed };
   },
 
@@ -481,7 +523,8 @@ export const getRfcStatus = tool('iana_get_rfc_status', {
     if (result.failed.length > 0) {
       lines.push('', '### Failed');
       for (const failure of result.failed) {
-        lines.push(`- ${inline(failure.id)}: ${inline(failure.error)}`);
+        const reason = failure.reason ? ` (${inline(failure.reason)})` : '';
+        lines.push(`- ${inline(failure.id)}: ${inline(failure.error)}${reason}`);
       }
     }
     return [{ type: 'text', text: lines.join('\n') }];

@@ -6,9 +6,12 @@
  * `[` is not split on commas), ids resolving to one document fetched once, BCP /
  * STD / FYI labels as unsupported documents, an unpublished RFC as
  * `found: false`, partial failure into `failed[]` (a failed `relateddocument`
- * read included), the rethrow only when every id failed upstream, the
- * stream-and-group notice, a cancelled call reporting no per-id failures, the
- * `pacer_shed` rows for both hosts, and `format()` parity and sanitizing.
+ * read included, each entry carrying its reason when classified), the rethrow
+ * only when every id failed, the stream-and-group notice, a cancelled call
+ * reporting no per-id failures, the `pacer_shed` rows for both hosts, the
+ * `request_limit` rows (20 Datatracker requests per call, retries counted, the
+ * ids past them in `failed[]` with a notice), and `format()` parity and
+ * sanitizing.
  * Upstream I/O is a `createFetchMock` fake; every author and address is invented.
  */
 
@@ -20,6 +23,7 @@ import {
   relatedDocumentsUrl,
   rfcJsonUrl,
 } from '@/services/ietf/ietf-doc-service.js';
+import { DATATRACKER_CALL_REQUESTS } from '@/services/upstream/upstream-client.js';
 import {
   DOC_PERSON_MARKERS,
   draftDocJson,
@@ -104,7 +108,8 @@ function serveDraft(
 
 const call = (input: Record<string, unknown>) => callTool(getRfcStatus, input);
 const docs = (out: Out) => out.structured.documents as Doc[];
-const failed = (out: Out) => out.structured.failed as { error: string; id: string }[];
+const failed = (out: Out) =>
+  out.structured.failed as { error: string; id: string; reason?: string }[];
 const docIds = (out: Out) => docs(out).map((doc) => doc.id);
 
 const RFC_8001: Doc = {
@@ -758,14 +763,19 @@ describe('iana_get_rfc_status: partial failure', () => {
     expect(failed(out)[0]?.error).toContain('unexpected shape');
   });
 
-  it('sends a draft missing rev, state, or time to failed[]', async () => {
+  it('sends a draft missing rev, state, or time to failed[], with its reason', async () => {
     const s = boot();
     serveRfc(s, 8001);
     serveDraft(s, DRAFT, { doc: () => jsonResponse(draftDocJson(DRAFT, { rev: null })) });
     const out = await call({ ids: [DRAFT, 'RFC 8001'] });
     expect(failed(out)).toEqual([
-      { id: DRAFT, error: expect.stringContaining('lacks its revision') },
+      {
+        id: DRAFT,
+        error: expect.stringContaining('lacks its revision'),
+        reason: 'upstream_unreadable',
+      },
     ]);
+    expect(out.text).toContain(`- ${DRAFT}: ${failed(out)[0]?.error} (upstream_unreadable)`);
   });
 
   it('files a failed draft under the id as requested, revision included', async () => {
@@ -1045,6 +1055,110 @@ describe('iana_get_rfc_status: pacer_shed', () => {
     const out = await call({ ids: ['RFC 8001'] });
     expect(out.isError).toBe(false);
     expect(docs(out)[0]?.found).toBe(true);
+  });
+});
+
+describe('iana_get_rfc_status: request_limit', () => {
+  const DRAFTS = [...'abcdefghij'].map((letter) => `draft-example-wg-${letter}`);
+  const RFCS = Array.from({ length: 10 }, (_, index) => 8001 + index);
+  const LIMIT_HINT =
+    'Call iana_get_rfc_status again with just the ids that failed with request_limit.';
+  const LIMIT_MESSAGE =
+    'Not resolved: this call reached its limit of 20 Datatracker requests first. Call iana_get_rfc_status again with this id.';
+  const datatrackerFetches = (s: Setup) =>
+    s.fetched().filter((url) => url.startsWith('https://datatracker.ietf.org/')).length;
+
+  it('declares request_limit as retryable RateLimited, its when text naming the 20-request limit', () => {
+    expect(DATATRACKER_CALL_REQUESTS).toBe(20);
+    const entry = getRfcStatus.errors?.find((candidate) => candidate.reason === 'request_limit');
+    expect(entry).toMatchObject({
+      code: JsonRpcErrorCode.RateLimited,
+      retryable: true,
+      recovery: LIMIT_HINT,
+    });
+    expect(entry?.when).toContain('20 Datatracker requests');
+  });
+
+  it('starts at most 20 Datatracker requests and returns the ids past them in failed', async () => {
+    const s = boot();
+    for (const name of DRAFTS) serveDraft(s, name);
+    const out = await call({ ids: DRAFTS });
+    expect(out.isError).toBe(false);
+    expect(datatrackerFetches(s)).toBe(20);
+    expect(docs(out)).toHaveLength(5);
+    expect(failed(out)).toHaveLength(5);
+    expect([...docIds(out), ...failed(out).map((failure) => failure.id)].sort()).toEqual(DRAFTS);
+    for (const failure of failed(out)) {
+      expect(failure).toEqual({ id: failure.id, error: LIMIT_MESSAGE, reason: 'request_limit' });
+    }
+    const cut = failed(out).map((failure) => failure.id);
+    expect(out.structured.notice).toBe(
+      `${cut.join(', ')} were not resolved within this call's limit of 20 Datatracker requests; call iana_get_rfc_status again with them.`,
+    );
+    expect(out.text).toContain(String(out.structured.notice));
+    expect(out.text).toContain(`- ${cut[0]}: ${LIMIT_MESSAGE} (request_limit)`);
+  });
+
+  it('names one cut id in the singular, ahead of the stream-and-group fragment', async () => {
+    const s = boot();
+    const drafts = DRAFTS.slice(0, 7);
+    for (const name of drafts) serveDraft(s, name);
+    serveRfc(s, 8001, { tracking: notFound });
+    const out = await call({ ids: [...drafts, 'RFC 8001'] });
+    expect(datatrackerFetches(s)).toBe(20);
+    expect(failed(out)).toEqual([
+      { id: expect.any(String), error: LIMIT_MESSAGE, reason: 'request_limit' },
+    ]);
+    expect(out.structured.notice).toBe(
+      `${failed(out)[0]?.id} was not resolved within this call's limit of 20 Datatracker requests; call iana_get_rfc_status again with it. Stream and working group were unavailable for RFC 8001; status and relations come from the RFC Editor.`,
+    );
+  });
+
+  it('counts every retry: a failing Datatracker gets 20 requests, not three per RFC', async () => {
+    const s = boot();
+    for (const n of RFCS) serveRfc(s, n, { tracking: () => statusResponse(503) });
+    const out = await call({ ids: RFCS.map((n) => `RFC ${n}`) });
+    expect(out.isError).toBe(false);
+    expect(datatrackerFetches(s)).toBe(20);
+    expect(docs(out).every((doc) => doc.found && doc.rfc?.stream === undefined)).toBe(true);
+    expect(failed(out)).toEqual([]);
+    expect(out.structured.notice).toContain(
+      'Stream and working group were unavailable for RFC 8001',
+    );
+  });
+
+  it('answers ten RFCs inside the limit with no request_limit failure', async () => {
+    const s = boot();
+    for (const n of RFCS) serveRfc(s, n);
+    const out = await call({ ids: RFCS.map((n) => `RFC ${n}`) });
+    expect(datatrackerFetches(s)).toBe(10);
+    expect(failed(out)).toEqual([]);
+    expect(docs(out).every((doc) => doc.rfc?.stream === 'IETF')).toBe(true);
+  });
+
+  it('fails the call with request_limit when the limit cut every id', async () => {
+    const s = boot();
+    for (const name of DRAFTS) serveDraft(s, name, { doc: () => statusResponse(503) });
+    const out = await call({ ids: DRAFTS });
+    expect(out.isError).toBe(true);
+    expect(out.structured.error).toMatchObject({
+      code: JsonRpcErrorCode.RateLimited,
+      message: LIMIT_MESSAGE,
+      data: { reason: 'request_limit', recovery: { hint: LIMIT_HINT } },
+    });
+    expect(out.text).toContain(`Recovery: ${LIMIT_HINT}`);
+    expect(datatrackerFetches(s)).toBe(20);
+  });
+
+  it('gives each call its own 20 requests', async () => {
+    const s = boot();
+    for (const name of DRAFTS) serveDraft(s, name);
+    const first = await call({ ids: DRAFTS });
+    const cut = failed(first).map((failure) => failure.id);
+    const second = await call({ ids: cut });
+    expect(second.isError).toBe(false);
+    expect(failed(second)).toEqual([]);
+    expect(docIds(second).sort()).toEqual(cut);
   });
 });
 

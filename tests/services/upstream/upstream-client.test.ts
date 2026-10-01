@@ -2,16 +2,21 @@
  * @fileoverview Tests for `UpstreamClient`: accept-lists (304/404 as results),
  * the content-type check, byte ceilings, the per-attempt timer, the retry
  * ladder, per-host pacing, and the one per-call budget across ladders and
- * pacer waits. Upstream I/O is a `createFetchMock` fake; timing runs on fake
+ * pacer waits, with its per-host request allowance. Upstream I/O is a
+ * `createFetchMock` fake; timing runs on fake
  * timers with jitter pinned.
  */
 
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { requestContextService } from '@cyanheads/mcp-ts-core/utils';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { type CallBudget, createCallBudget } from '@/services/upstream/call-budget.js';
 import {
+  DATATRACKER_CALL_REQUESTS,
   DEFAULT_PACING,
   type RequestOptions,
   UpstreamClient,
+  type UpstreamHost,
   type UpstreamResponse,
   upstreamUnreadable,
 } from '@/services/upstream/upstream-client.js';
@@ -608,6 +613,71 @@ describe('the one per-call budget', () => {
   });
 });
 
+describe("the budget's per-host request allowance", () => {
+  /** A 45 s budget that may start `requests` requests per host. */
+  const allowing = (requests: Partial<Record<UpstreamHost, number>>) =>
+    createCallBudget({
+      totalMs: 45_000,
+      signal: new AbortController().signal,
+      context: requestContextService.createRequestContext({ operation: 'test' }),
+      requests,
+    });
+  const json = (budget: CallBudget) => options({ expect: 'json' }, budget);
+
+  it('takes one request per attempt, retries included, and refuses once none is left', async () => {
+    const h = createHarness([{ match: DT_URL, respond: () => statusResponse(503) }]);
+    const budget = allowing({ datatracker: 4 });
+
+    const first = await settle(() => h.client.request(DT_URL, json(budget)));
+    expect(asMcpError(first.error).code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+    expect(h.http.calls).toHaveLength(3);
+
+    const second = await settle(() => h.client.request(DT_URL, json(budget)));
+    const refused = asMcpError(second.error);
+    expect(refused.code).toBe(JsonRpcErrorCode.RateLimited);
+    expect(refused.data).toMatchObject({
+      reason: 'request_limit',
+      host: 'datatracker.ietf.org',
+      retryable: false,
+    });
+    expect(h.http.calls).toHaveLength(4);
+
+    const third = await settle(() => h.client.request(DT_URL, json(budget)));
+    expect(asMcpError(third.error).data).toMatchObject({ reason: 'request_limit' });
+    expect(h.http.calls).toHaveLength(4);
+  });
+
+  it('bounds only the hosts it names', async () => {
+    const h = createHarness([
+      { match: DT_URL, respond: () => jsonResponse({}) },
+      { match: RFC_URL, respond: () => jsonResponse({}) },
+    ]);
+    const budget = allowing({ datatracker: 1 });
+    await h.client.request(DT_URL, json(budget));
+    for (let index = 0; index < 5; index++) await h.client.request(RFC_URL, json(budget));
+    expect(
+      asMcpError(await thrown(() => h.client.request(DT_URL, json(budget)))).data,
+    ).toMatchObject({ reason: 'request_limit' });
+    expect(h.http.calls).toHaveLength(6);
+  });
+
+  it('counts down its own copy, leaving the object it was given untouched', async () => {
+    const h = createHarness([{ match: DT_URL, respond: () => jsonResponse({}) }]);
+    const allowance = { datatracker: 2 };
+    const budget = allowing(allowance);
+    await h.client.request(DT_URL, json(budget));
+    expect(allowance).toEqual({ datatracker: 2 });
+    expect(budget.requests).toEqual({ datatracker: 1 });
+  });
+
+  it('is unbounded when the budget names no allowance', async () => {
+    const h = createHarness([{ match: DT_URL, respond: () => jsonResponse({}) }]);
+    const budget = makeBudget();
+    for (let index = 0; index < 30; index++) await h.client.request(DT_URL, json(budget));
+    expect(h.http.calls).toHaveLength(30);
+  });
+});
+
 describe('per-host pacing', () => {
   it('spaces IANA starts by the 500 ms gap', async () => {
     const starts: number[] = [];
@@ -680,6 +750,11 @@ describe('per-host pacing', () => {
       minStartGapMs: 250,
       limits: [{ requests: 60, perMs: 60_000 }],
     });
+  });
+
+  it('allows one call a third of the Datatracker pacer: 20 requests', () => {
+    expect(DATATRACKER_CALL_REQUESTS).toBe(20);
+    expect(DATATRACKER_CALL_REQUESTS * 3).toBe(DEFAULT_PACING.datatracker.limits?.[0]?.requests);
   });
 
   it('rejects a host with no pacer rather than fetching it', async () => {
