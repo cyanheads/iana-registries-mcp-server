@@ -395,7 +395,7 @@ describe('iana_lookup_pen: organization search', () => {
     }
   });
 
-  it('cuts at limit, counts the full match set, and says how to see the rest', async () => {
+  it('cuts at limit, counts the full match set, and names the next offset', async () => {
     boot();
     const out = await call({ organization: 'example', limit: 2 });
     expect(numbers(out)).toEqual([1, 4]);
@@ -404,9 +404,56 @@ describe('iana_lookup_pen: organization search', () => {
       shown: 2,
       cap: 2,
       truncated: true,
+      next_offset: 2,
       notice:
-        'Showing 2 of 3 matching organizations; raise limit (max 100) or add words to organization to narrow.',
+        'Showing 2 of 3 matching organizations; pass offset 2 for the next page, raise limit (max 100), or add words to organization to narrow.',
     });
+  });
+
+  it('reaches every match past the maximum limit through offset', async () => {
+    boot(
+      penText(
+        Array.from({ length: 130 }, (_, index) =>
+          penRecord(index + 1, `Example University ${index + 1}`),
+        ),
+      ),
+    );
+    const first = await call({ organization: 'university', limit: 100 });
+    expect(first.structured).toMatchObject({
+      totalCount: 130,
+      shown: 100,
+      truncated: true,
+      next_offset: 100,
+      notice:
+        'Showing 100 of 130 matching organizations; pass offset 100 for the next page, or add words to organization to narrow.',
+    });
+    const last = await call({ organization: 'university', limit: 100, offset: 100 });
+    expect(numbers(last)).toEqual(Array.from({ length: 30 }, (_, index) => index + 101));
+    expect(last.structured).toMatchObject({ totalCount: 130, shown: 30, truncated: false });
+    expect(last.structured).not.toHaveProperty('next_offset');
+    expect(last.structured).not.toHaveProperty('notice');
+  });
+
+  it('returns an empty page for an offset past the end, with the total', async () => {
+    boot();
+    const out = await call({ organization: 'example', offset: 3 });
+    expect(out.structured).toMatchObject({
+      mode: 'organization',
+      enterprises: [],
+      totalCount: 3,
+      shown: 0,
+      notice:
+        'Offset 3 is past the 3 matching organizations; pass an offset below 3, or omit offset to start over.',
+    });
+  });
+
+  it('ignores offset in pen mode and says so', async () => {
+    boot();
+    const out = await call({ pen: '1', offset: 5 });
+    expect(numbers(out)).toEqual([1]);
+    expect(String(out.structured.notice)).toContain(
+      'offset applies to organization mode only; it was ignored for this exact lookup.',
+    );
   });
 
   it('puts the exact match on the first page when a limit cuts the list', async () => {
@@ -497,6 +544,7 @@ describe('iana_lookup_pen: input validation', () => {
     ['limit 0', { organization: 'example', limit: 0 }],
     ['limit above 100', { organization: 'example', limit: 101 }],
     ['a non-numeric limit', { organization: 'example', limit: 'many' }],
+    ['a negative offset', { organization: 'example', offset: -1 }],
   ])('rejects %s as invalid arguments, before any fetch', async (_label, input) => {
     const s = boot();
     const out = await call(input);

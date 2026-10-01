@@ -723,7 +723,7 @@ describe('iana_lookup_media_type: keyword', () => {
     );
   });
 
-  it('cuts at limit, counts the full match set, and says how to see the rest', async () => {
+  it('cuts at limit, counts the full match set, and names the next offset', async () => {
     boot();
     const out = await call({ keyword: 'json', limit: 2 });
     expect(types(out)).toEqual(['application/json', 'application/vnd.api+json']);
@@ -732,9 +732,42 @@ describe('iana_lookup_media_type: keyword', () => {
       shown: 2,
       cap: 2,
       truncated: true,
+      next_offset: 2,
       notice:
-        'Showing 2 of 4 matching media types; raise limit (max 100) or add words to keyword to narrow.',
+        'Showing 2 of 4 matching media types; pass offset 2 for the next page, raise limit (max 100), or add words to keyword to narrow.',
     });
+  });
+
+  it('pages by offset in the same order, the last page without next_offset', async () => {
+    boot();
+    const second = await call({ keyword: 'json', limit: 2, offset: 2 });
+    expect([...types(await call({ keyword: 'json', limit: 2 })), ...types(second)]).toEqual(
+      types(await call({ keyword: 'json' })),
+    );
+    expect(second.structured).toMatchObject({ found: true, shown: 2, truncated: false });
+    expect(second.structured).not.toHaveProperty('next_offset');
+  });
+
+  it('returns an empty page for an offset past the end, still found, with the total', async () => {
+    boot();
+    const out = await call({ keyword: 'json', offset: 10 });
+    expect(out.structured).toMatchObject({
+      found: true,
+      media_types: [],
+      totalCount: 4,
+      shown: 0,
+      notice:
+        'Offset 10 is past the 4 matching media types; pass an offset below 4, or omit offset to start over.',
+    });
+  });
+
+  it('ignores offset in type mode and says so', async () => {
+    boot();
+    const out = await call({ type: 'application/json', offset: 2 });
+    expect(types(out)).toEqual(['application/json']);
+    expect(out.structured.notice).toBe(
+      'offset applies to keyword mode only; it was ignored for this exact lookup.',
+    );
   });
 
   it('explains a miss, echoing the keyword on one line', async () => {
@@ -792,6 +825,7 @@ describe('iana_lookup_media_type: input validation', () => {
     ['limit 0', { keyword: 'json', limit: 0 }],
     ['limit above 100', { keyword: 'json', limit: 101 }],
     ['a non-numeric limit', { keyword: 'json', limit: 'many' }],
+    ['a negative offset', { keyword: 'json', offset: -5 }],
   ])('rejects %s as invalid arguments, before any fetch', async (_label, input) => {
     const s = boot();
     const out = await call(input);

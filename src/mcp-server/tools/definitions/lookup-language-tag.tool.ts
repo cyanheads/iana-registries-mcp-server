@@ -13,9 +13,21 @@ import { getRegistryStore } from '@/services/registry/registry-store.js';
 import { compileQuery, matchesQuery, normalizeForSearch } from '@/services/registry/search-text.js';
 import type { LanguageRecord } from '@/services/registry/types.js';
 import { startCallBudget } from '@/services/upstream/call-budget.js';
-import { discloseList, echo, listEnrichment } from '../shared/list-enrichment.js';
+import {
+  discloseList,
+  echo,
+  offsetIgnored,
+  offsetListEnrichment,
+  offsetPage,
+} from '../shared/list-enrichment.js';
 import { inline, joinLines, quote, sourceLines } from '../shared/markdown.js';
-import { blankAsUnset, limitInput, SourceSchema, searchWords } from '../shared/schemas.js';
+import {
+  blankAsUnset,
+  limitInput,
+  offsetInput,
+  SourceSchema,
+  searchWords,
+} from '../shared/schemas.js';
 
 /** Hyphen-separated subtags of 1–8 letters or digits (underscores are converted first). */
 const TAG_PATTERN = /^[A-Za-z0-9]{1,8}(?:-[A-Za-z0-9]{1,8})*$/;
@@ -159,6 +171,7 @@ export const lookupLanguageTag = tool('iana_lookup_language_tag', {
     limit: limitInput(100, 25).describe(
       'Maximum number of description matches to return, 1–100. Default 25. Tag mode always returns every part of the tag.',
     ),
+    offset: offsetInput('description'),
   }),
   output: z.object({
     mode: z.enum(['tag', 'description']).describe('Which lookup ran.'),
@@ -258,7 +271,7 @@ export const lookupLanguageTag = tool('iana_lookup_language_tag', {
       ),
     source: SourceSchema,
   }),
-  enrichment: listEnrichment,
+  enrichment: offsetListEnrichment,
   errors: [
     {
       reason: 'mode_required',
@@ -310,6 +323,7 @@ export const lookupLanguageTag = tool('iana_lookup_language_tag', {
         fragments: [
           input.subtag_type !== undefined &&
             'subtag_type applies to description mode only; it was ignored for this tag lookup.',
+          offsetIgnored(input.offset, 'description'),
         ],
       });
       return {
@@ -338,19 +352,25 @@ export const lookupLanguageTag = tool('iana_lookup_language_tag', {
     const isExact = (record: LanguageRecord) =>
       record.descriptions.some((text) => normalizeForSearch(text) === wanted);
     const ranked = [...hits.filter(isExact), ...hits.filter((record) => !isExact(record))];
-    const matches = ranked.slice(0, input.limit).map(toTypedRecord);
-    const more = ranked.length > matches.length;
+    const page = offsetPage(ranked, {
+      offset: input.offset,
+      limit: input.limit,
+      max: 100,
+      noun: 'matching records',
+      narrow: 'add words to description or set subtag_type to narrow',
+    });
+    const matches = page.items.map(toTypedRecord);
     const typeClause = input.subtag_type ? ` with type ${input.subtag_type}` : '';
     discloseList(ctx.enrich, {
       total: ranked.length,
       shown: matches.length,
       cap: input.limit,
-      more,
+      more: page.nextOffset !== undefined,
+      nextOffset: page.nextOffset,
       fragments: [
         ranked.length === 0 &&
           `No subtag description matched "${echo(description)}"${typeClause}. Try the language's English name or an alternative name.`,
-        more &&
-          `Showing ${matches.length} of ${ranked.length} matching records; raise limit (max 100), add words to description, or set subtag_type to narrow.`,
+        page.notice,
       ],
     });
     return { mode: 'description' as const, matches, source: loaded.source };

@@ -249,7 +249,7 @@ describe('iana_lookup_uri_scheme: keyword', () => {
     expect(names(await call({ keyword: 'WS' }))).toEqual(['ws', 'dws']);
   });
 
-  it('cuts at limit, discloses it, and counts the full match set', async () => {
+  it('cuts at limit, discloses it, counts the full match set, and names the next offset', async () => {
     boot();
     const page = await call({ keyword: 'websocket', limit: 1 });
     expect(names(page)).toEqual(['ws']);
@@ -258,9 +258,40 @@ describe('iana_lookup_uri_scheme: keyword', () => {
       shown: 1,
       cap: 1,
       truncated: true,
+      next_offset: 1,
       notice:
-        'Showing 1 of 2 matching schemes; raise limit (max 100) or add words to keyword to narrow.',
+        'Showing 1 of 2 matching schemes; pass offset 1 for the next page, raise limit (max 100), or add words to keyword to narrow.',
     });
+  });
+
+  it('pages by offset: the next page holds the rest, without next_offset', async () => {
+    boot();
+    const second = await call({ keyword: 'websocket', limit: 1, offset: 1 });
+    expect(names(second)).toEqual(['wss']);
+    expect(second.structured).toMatchObject({ found: true, shown: 1, truncated: false });
+    expect(second.structured).not.toHaveProperty('next_offset');
+  });
+
+  it('returns an empty page for an offset past the end, still found, with the total', async () => {
+    boot();
+    const out = await call({ keyword: 'websocket', offset: 2 });
+    expect(out.structured).toMatchObject({
+      found: true,
+      schemes: [],
+      totalCount: 2,
+      shown: 0,
+      notice:
+        'Offset 2 is past the 2 matching schemes; pass an offset below 2, or omit offset to start over.',
+    });
+  });
+
+  it('ignores offset in scheme mode and says so', async () => {
+    boot();
+    const out = await call({ scheme: 'mailto', offset: 1 });
+    expect(names(out)).toEqual(['mailto']);
+    expect(out.structured.notice).toBe(
+      'offset applies to keyword mode only; it was ignored for this exact lookup.',
+    );
   });
 
   it('reads blank optional inputs as unset: keyword mode, no status filter, default limit', async () => {
@@ -292,6 +323,7 @@ describe('iana_lookup_uri_scheme: input validation', () => {
     ['limit 0', { keyword: 'ws', limit: 0 }],
     ['limit above 100', { keyword: 'ws', limit: 101 }],
     ['a non-numeric limit', { keyword: 'ws', limit: 'many' }],
+    ['a negative offset', { keyword: 'ws', offset: -1 }],
   ])('rejects %s as invalid arguments, before any fetch', async (_label, input) => {
     const s = boot();
     const out = await call(input);

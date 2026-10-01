@@ -13,7 +13,13 @@ import { requireTable } from '@/services/registry/registry-tables.js';
 import { compileQuery, matchesQuery, toSearchText } from '@/services/registry/search-text.js';
 import type { RegistryRecord } from '@/services/registry/types.js';
 import { startCallBudget } from '@/services/upstream/call-budget.js';
-import { discloseList, echo, listEnrichment } from '../shared/list-enrichment.js';
+import {
+  discloseList,
+  echo,
+  offsetIgnored,
+  offsetListEnrichment,
+  offsetPage,
+} from '../shared/list-enrichment.js';
 import {
   datesLine,
   inline,
@@ -25,6 +31,7 @@ import {
 import {
   blankAsUnset,
   limitInput,
+  offsetInput,
   ReferenceSchema,
   SourceSchema,
   searchWords,
@@ -70,6 +77,7 @@ export const lookupHttpField = tool('iana_lookup_http_field', {
       'Keep only fields with this registration status. Applies to both modes.',
     ),
     limit: limitInput(100, 25),
+    offset: offsetInput('keyword'),
   }),
   output: z.object({
     mode: z.enum(['name', 'keyword']).describe('Which lookup ran.'),
@@ -102,7 +110,7 @@ export const lookupHttpField = tool('iana_lookup_http_field', {
       .describe('Matching fields: exact name hits first, then registry order.'),
     source: SourceSchema,
   }),
-  enrichment: listEnrichment,
+  enrichment: offsetListEnrichment,
   errors: [
     {
       reason: 'mode_required',
@@ -161,6 +169,7 @@ export const lookupHttpField = tool('iana_lookup_http_field', {
             `${input.name} has no IANA registration. Call iana_lookup_http_field with keyword set to part of the name to find related registered fields.`,
           more &&
             `Showing ${fields.length} of ${rows.length} rows for ${input.name}; raise limit (max 100) to see the rest.`,
+          offsetIgnored(input.offset, 'keyword'),
         ],
       });
       return { mode: 'name' as const, found: fields.length > 0, fields, source: loaded.source };
@@ -177,20 +186,26 @@ export const lookupHttpField = tool('iana_lookup_http_field', {
       ...matches.filter((field) => field.name.toLowerCase() === wanted),
       ...matches.filter((field) => field.name.toLowerCase() !== wanted),
     ];
-    const fields = ranked.slice(0, input.limit);
-    const more = ranked.length > fields.length;
+    const page = offsetPage(ranked, {
+      offset: input.offset,
+      limit: input.limit,
+      max: 100,
+      noun: 'matching fields',
+      narrow: 'add words to keyword to narrow',
+    });
+    const fields = page.items;
     discloseList(ctx.enrich, {
       total: ranked.length,
       shown: fields.length,
       cap: input.limit,
-      more,
+      more: page.nextOffset !== undefined,
+      nextOffset: page.nextOffset,
       fragments: [
         ranked.length === 0 && `No registered field matched "${echo(keyword)}"${statusNote}.`,
-        more &&
-          `Showing ${fields.length} of ${ranked.length} matching fields; raise limit (max 100) or add words to keyword to narrow.`,
+        page.notice,
       ],
     });
-    return { mode: 'keyword' as const, found: fields.length > 0, fields, source: loaded.source };
+    return { mode: 'keyword' as const, found: ranked.length > 0, fields, source: loaded.source };
   },
 
   format: (result) => {

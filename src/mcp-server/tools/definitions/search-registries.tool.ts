@@ -11,9 +11,9 @@ import { getRegistryStore } from '@/services/registry/registry-store.js';
 import { compileQuery, matchesQuery } from '@/services/registry/search-text.js';
 import type { IndexEntry } from '@/services/registry/types.js';
 import { startCallBudget } from '@/services/upstream/call-budget.js';
-import { discloseList, echo, listEnrichment } from '../shared/list-enrichment.js';
+import { discloseList, echo, offsetListEnrichment, offsetPage } from '../shared/list-enrichment.js';
 import { inline, sourceLines, url } from '../shared/markdown.js';
-import { limitInput, SourceSchema, searchWords } from '../shared/schemas.js';
+import { limitInput, offsetInput, SourceSchema, searchWords } from '../shared/schemas.js';
 
 function toRegistry(entry: IndexEntry) {
   return {
@@ -40,6 +40,7 @@ export const searchRegistries = tool('iana_search_registries', {
         'Words matched as whole tokens against registry titles, categories, and ids, e.g. "tls cipher". An exact registry or sub-registry id ranks first.',
       ),
     limit: limitInput(50, 20),
+    offset: offsetInput(),
   }),
   output: z.object({
     registries: z
@@ -78,7 +79,7 @@ export const searchRegistries = tool('iana_search_registries', {
       .describe('Matching index entries: exact id hits first, then index order.'),
     source: SourceSchema,
   }),
-  enrichment: listEnrichment,
+  enrichment: offsetListEnrichment,
   errors: [
     {
       reason: 'index_unreadable',
@@ -113,19 +114,25 @@ export const searchRegistries = tool('iana_search_registries', {
       (entry) => !isExact(entry) && matchesQuery(entry.searchText, query),
     );
     const matches = [...exact, ...rest];
-    const registries = matches.slice(0, input.limit).map(toRegistry);
-    const more = matches.length > registries.length;
+    const page = offsetPage(matches, {
+      offset: input.offset,
+      limit: input.limit,
+      max: 50,
+      noun: 'matching registries',
+      narrow: 'add words to query to narrow',
+    });
+    const registries = page.items.map(toRegistry);
 
     discloseList(ctx.enrich, {
       total: matches.length,
       shown: registries.length,
       cap: input.limit,
-      more,
+      more: page.nextOffset !== undefined,
+      nextOffset: page.nextOffset,
       fragments: [
         matches.length === 0 &&
           `No registry title matched "${echo(input.query)}". Use the protocol's name or acronym (e.g. "DHCP options"); the curated tools cover ports, media types, HTTP status codes and fields, URI schemes, enterprise numbers, and language tags.`,
-        more &&
-          `Showing ${registries.length} of ${matches.length} matching registries; add words to query to narrow, or raise limit (max 50).`,
+        page.notice,
       ],
     });
     return { registries, source };

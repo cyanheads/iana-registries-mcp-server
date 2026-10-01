@@ -253,7 +253,7 @@ describe('iana_lookup_http_status: keyword', () => {
     });
   });
 
-  it('cuts at limit, discloses it, and counts the full match set', async () => {
+  it('cuts at limit, discloses it, counts the full match set, and names the next offset', async () => {
     boot();
     const out = await call({ keyword: 'gateway', limit: 1 });
     expect(codes(out)).toEqual([502]);
@@ -262,10 +262,43 @@ describe('iana_lookup_http_status: keyword', () => {
       shown: 1,
       cap: 1,
       truncated: true,
+      next_offset: 1,
       notice:
-        'Showing 1 of 2 matching status codes; raise limit (max 100) or add words to keyword to narrow.',
+        'Showing 1 of 2 matching status codes; pass offset 1 for the next page, raise limit (max 100), or add words to keyword to narrow.',
     });
     expect(out.text).toContain('Showing 1 of 2 matching status codes');
+  });
+
+  it('pages by offset: the next page holds the rest, without next_offset', async () => {
+    boot();
+    const second = await call({ keyword: 'gateway', limit: 1, offset: 1 });
+    expect([...codes(await call({ keyword: 'gateway', limit: 1 })), ...codes(second)]).toEqual(
+      codes(await call({ keyword: 'gateway' })),
+    );
+    expect(second.structured).toMatchObject({ found: true, shown: 1, truncated: false });
+    expect(second.structured).not.toHaveProperty('next_offset');
+  });
+
+  it('returns an empty page for an offset past the end, still found, with the total', async () => {
+    boot();
+    const out = await call({ keyword: 'gateway', offset: 2 });
+    expect(out.structured).toMatchObject({
+      found: true,
+      statuses: [],
+      totalCount: 2,
+      shown: 0,
+      notice:
+        'Offset 2 is past the 2 matching status codes; pass an offset below 2, or omit offset to start over.',
+    });
+  });
+
+  it('ignores offset in code mode and says so', async () => {
+    boot();
+    const out = await call({ code: 502, offset: 1 });
+    expect(codes(out)).toEqual([502]);
+    expect(out.structured.notice).toBe(
+      'offset applies to keyword mode only; it was ignored for this exact lookup.',
+    );
   });
 
   it('does not truncate when the page holds every match', async () => {
@@ -298,6 +331,7 @@ describe('iana_lookup_http_status: input validation', () => {
     ['limit above 100', { code: 200, limit: 101 }],
     ['a fractional limit', { code: 200, limit: 1.5 }],
     ['a non-numeric limit', { code: 200, limit: 'many' }],
+    ['a negative offset', { keyword: 'gateway', offset: -1 }],
   ])('rejects %s as invalid arguments, before any fetch', async (_label, input) => {
     const s = boot();
     const out = await call(input);

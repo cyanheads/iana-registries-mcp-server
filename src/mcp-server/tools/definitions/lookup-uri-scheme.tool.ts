@@ -13,7 +13,13 @@ import { requireTable } from '@/services/registry/registry-tables.js';
 import { compileQuery, matchesQuery, toSearchText } from '@/services/registry/search-text.js';
 import type { RegistryRecord } from '@/services/registry/types.js';
 import { startCallBudget } from '@/services/upstream/call-budget.js';
-import { discloseList, echo, listEnrichment } from '../shared/list-enrichment.js';
+import {
+  discloseList,
+  echo,
+  offsetIgnored,
+  offsetListEnrichment,
+  offsetPage,
+} from '../shared/list-enrichment.js';
 import {
   datesLine,
   inline,
@@ -26,6 +32,7 @@ import {
 import {
   blankAsUnset,
   limitInput,
+  offsetInput,
   ReferenceSchema,
   SourceSchema,
   searchWords,
@@ -86,6 +93,7 @@ export const lookupUriScheme = tool('iana_lookup_uri_scheme', {
       'Keep only schemes with this registration status. Applies to both modes.',
     ),
     limit: limitInput(100, 25),
+    offset: offsetInput('keyword'),
   }),
   output: z.object({
     mode: z.enum(['scheme', 'keyword']).describe('Which lookup ran.'),
@@ -127,7 +135,7 @@ export const lookupUriScheme = tool('iana_lookup_uri_scheme', {
       .describe('Matching schemes: exact scheme hits first, then registry order.'),
     source: SourceSchema,
   }),
-  enrichment: listEnrichment,
+  enrichment: offsetListEnrichment,
   errors: [
     {
       reason: 'mode_required',
@@ -188,6 +196,7 @@ export const lookupUriScheme = tool('iana_lookup_uri_scheme', {
             `${wanted} is not a registered URI scheme. Call iana_lookup_uri_scheme with keyword to search descriptions.`,
           more &&
             `Showing ${schemes.length} of ${rows.length} rows for ${wanted}; raise limit (max 100) to see the rest.`,
+          offsetIgnored(input.offset, 'keyword'),
         ],
       });
       return { mode: 'scheme' as const, found: schemes.length > 0, schemes, source: loaded.source };
@@ -207,20 +216,26 @@ export const lookupUriScheme = tool('iana_lookup_uri_scheme', {
       ...matches.filter((scheme) => scheme.scheme.toLowerCase() === wanted),
       ...matches.filter((scheme) => scheme.scheme.toLowerCase() !== wanted),
     ];
-    const schemes = ranked.slice(0, input.limit);
-    const more = ranked.length > schemes.length;
+    const page = offsetPage(ranked, {
+      offset: input.offset,
+      limit: input.limit,
+      max: 100,
+      noun: 'matching schemes',
+      narrow: 'add words to keyword to narrow',
+    });
+    const schemes = page.items;
     discloseList(ctx.enrich, {
       total: ranked.length,
       shown: schemes.length,
       cap: input.limit,
-      more,
+      more: page.nextOffset !== undefined,
+      nextOffset: page.nextOffset,
       fragments: [
         ranked.length === 0 && `No URI scheme matched "${echo(keyword)}"${statusNote}.`,
-        more &&
-          `Showing ${schemes.length} of ${ranked.length} matching schemes; raise limit (max 100) or add words to keyword to narrow.`,
+        page.notice,
       ],
     });
-    return { mode: 'keyword' as const, found: schemes.length > 0, schemes, source: loaded.source };
+    return { mode: 'keyword' as const, found: ranked.length > 0, schemes, source: loaded.source };
   },
 
   format: (result) => {

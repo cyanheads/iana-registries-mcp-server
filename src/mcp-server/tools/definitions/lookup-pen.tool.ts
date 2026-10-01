@@ -12,9 +12,21 @@ import { getRegistryStore } from '@/services/registry/registry-store.js';
 import { compileQuery, matchesQuery, normalizeForSearch } from '@/services/registry/search-text.js';
 import type { PenEntry } from '@/services/registry/types.js';
 import { startCallBudget } from '@/services/upstream/call-budget.js';
-import { discloseList, echo, listEnrichment } from '../shared/list-enrichment.js';
+import {
+  discloseList,
+  echo,
+  offsetIgnored,
+  offsetListEnrichment,
+  offsetPage,
+} from '../shared/list-enrichment.js';
 import { inline, sourceLines } from '../shared/markdown.js';
-import { blankAsUnset, limitInput, SourceSchema, searchWords } from '../shared/schemas.js';
+import {
+  blankAsUnset,
+  limitInput,
+  offsetInput,
+  SourceSchema,
+  searchWords,
+} from '../shared/schemas.js';
 
 /** The private enterprise arc; enterprise N's OID is this plus `N`. */
 const ENTERPRISE_ARC = '1.3.6.1.4.1';
@@ -50,6 +62,7 @@ export const lookupPen = tool('iana_lookup_pen', {
       'Words matched as whole tokens against the names of assigned entries, e.g. "cisco systems"; look up a number with pen to see a reserved or unassigned one. Pass this or pen, not both.',
     ),
     limit: limitInput(100, 25),
+    offset: offsetInput('organization'),
   }),
   output: z.object({
     mode: z.enum(['pen', 'organization']).describe('Which lookup ran.'),
@@ -95,7 +108,7 @@ export const lookupPen = tool('iana_lookup_pen', {
       .describe('Matching entries: exact organization-name hits first, then number order.'),
     source: SourceSchema,
   }),
-  enrichment: listEnrichment,
+  enrichment: offsetListEnrichment,
   errors: [
     {
       reason: 'mode_required',
@@ -151,6 +164,7 @@ export const lookupPen = tool('iana_lookup_pen', {
           !entry && number <= model.maxNumber && `PEN ${number} has no entry in the registry.`,
           entry?.state === 'reserved' && `PEN ${number} is reserved; no organization holds it.`,
           entry?.state === 'unassigned' && `PEN ${number} is unassigned; no organization holds it.`,
+          offsetIgnored(input.offset, 'organization'),
         ],
       });
       return {
@@ -171,18 +185,24 @@ export const lookupPen = tool('iana_lookup_pen', {
     const isExact = (entry: PenEntry) =>
       entry.organization !== undefined && normalizeForSearch(entry.organization) === wanted;
     const ranked = [...matches.filter(isExact), ...matches.filter((entry) => !isExact(entry))];
-    const enterprises = ranked.slice(0, input.limit).map(toEnterprise);
-    const more = ranked.length > enterprises.length;
+    const page = offsetPage(ranked, {
+      offset: input.offset,
+      limit: input.limit,
+      max: 100,
+      noun: 'matching organizations',
+      narrow: 'add words to organization to narrow',
+    });
+    const enterprises = page.items.map(toEnterprise);
     discloseList(ctx.enrich, {
       total: ranked.length,
       shown: enterprises.length,
       cap: input.limit,
-      more,
+      more: page.nextOffset !== undefined,
+      nextOffset: page.nextOffset,
       fragments: [
         ranked.length === 0 &&
           `No organization matched "${echo(organization)}". Try a shorter or alternative name (registrants use legal names, abbreviations, and former names).`,
-        more &&
-          `Showing ${enterprises.length} of ${ranked.length} matching organizations; raise limit (max 100) or add words to organization to narrow.`,
+        page.notice,
       ],
     });
     return {

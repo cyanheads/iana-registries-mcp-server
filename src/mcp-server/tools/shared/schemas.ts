@@ -1,7 +1,8 @@
 /**
  * @fileoverview Zod pieces every tool shares: the blank-as-unset input wrapper
  * (form clients submit every optional field, blank), digit-string integers, the
- * token-search input, and the `source` and `references` output shapes.
+ * token-search input, the `limit` and `offset` inputs, and the `source` and
+ * `references` output shapes.
  * @module mcp-server/tools/shared/schemas
  */
 
@@ -51,6 +52,18 @@ export function searchWords() {
 export function limitInput(max: number, fallback: number) {
   return blankAsUnset(z.number().int().min(1).max(max).default(fallback), digitsToNumber).describe(
     `Maximum number of results to return, 1–${max}. Default ${fallback}.`,
+  );
+}
+
+/**
+ * An `offset` input for a list mode: integer 0 or more, blank or a digit string
+ * accepted, default 0. `mode` names the list mode it pages when the tool also
+ * has exact-value modes, which ignore it.
+ */
+export function offsetInput(mode?: string) {
+  const matches = mode ? `${mode} matches` : 'matches';
+  return blankAsUnset(z.number().int().min(0).default(0), digitsToNumber).describe(
+    `Number of ${matches} to skip; pass the next_offset of the previous response to get the next page. Default 0.`,
   );
 }
 

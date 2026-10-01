@@ -25,7 +25,13 @@ import {
 } from '@/services/registry/search-text.js';
 import type { RegistryRecord } from '@/services/registry/types.js';
 import { startCallBudget } from '@/services/upstream/call-budget.js';
-import { discloseList, echo, listEnrichment } from '../shared/list-enrichment.js';
+import {
+  discloseList,
+  echo,
+  offsetIgnored,
+  offsetListEnrichment,
+  offsetPage,
+} from '../shared/list-enrichment.js';
 import {
   datesLine,
   inline,
@@ -38,6 +44,7 @@ import {
 import {
   blankAsUnset,
   limitInput,
+  offsetInput,
   ReferenceSchema,
   SourceSchema,
   searchWords,
@@ -165,6 +172,7 @@ export const lookupMediaType = tool('iana_lookup_media_type', {
       trimmed.toLowerCase(),
     ).describe('Keep only types under this top-level type, e.g. "image". Keyword mode only.'),
     limit: limitInput(100, 25),
+    offset: offsetInput('keyword'),
   }),
   output: z.object({
     mode: z.enum(['type', 'keyword']).describe('Which lookup ran.'),
@@ -238,7 +246,7 @@ export const lookupMediaType = tool('iana_lookup_media_type', {
       .describe('Matching media types: exact name hits first, then registry order.'),
     source: SourceSchema,
   }),
-  enrichment: listEnrichment,
+  enrichment: offsetListEnrichment,
   errors: [
     {
       reason: 'mode_required',
@@ -300,6 +308,7 @@ export const lookupMediaType = tool('iana_lookup_media_type', {
             'The registration template could not be read; registry fields are complete, template statements are missing.',
           input.top_level !== undefined &&
             'top_level applies to keyword mode only; it was ignored for this exact lookup.',
+          offsetIgnored(input.offset, 'keyword'),
         ],
       });
       return {
@@ -325,23 +334,29 @@ export const lookupMediaType = tool('iana_lookup_media_type', {
       normalizeForSearch(mediaType.type) === wanted ||
       normalizeForSearch(mediaType.subtype) === wanted;
     const ranked = [...matches.filter(isExact), ...matches.filter((m) => !isExact(m))];
-    const mediaTypes = ranked.slice(0, input.limit);
-    const more = ranked.length > mediaTypes.length;
+    const page = offsetPage(ranked, {
+      offset: input.offset,
+      limit: input.limit,
+      max: 100,
+      noun: 'matching media types',
+      narrow: 'add words to keyword to narrow',
+    });
+    const mediaTypes = page.items;
     discloseList(ctx.enrich, {
       total: ranked.length,
       shown: mediaTypes.length,
       cap: input.limit,
-      more,
+      more: page.nextOffset !== undefined,
+      nextOffset: page.nextOffset,
       fragments: [
         ranked.length === 0 &&
           `No registered media type matched "${echo(keyword)}"${topLevel ? ` in ${topLevel}` : ''}. Try fewer words${topLevel ? ' or drop top_level' : ''}.`,
-        more &&
-          `Showing ${mediaTypes.length} of ${ranked.length} matching media types; raise limit (max 100) or add words to keyword to narrow.`,
+        page.notice,
       ],
     });
     return {
       mode: 'keyword' as const,
-      found: mediaTypes.length > 0,
+      found: ranked.length > 0,
       media_types: mediaTypes,
       source: loaded.source,
     };

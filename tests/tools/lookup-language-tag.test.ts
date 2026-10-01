@@ -509,10 +509,36 @@ describe('iana_lookup_language_tag: description mode', () => {
       shown: 3,
       cap: 3,
       truncated: true,
+      next_offset: 3,
       notice:
-        'Showing 3 of 9 matching records; raise limit (max 100), add words to description, or set subtag_type to narrow.',
+        'Showing 3 of 9 matching records; pass offset 3 for the next page, raise limit (max 100), or add words to description or set subtag_type to narrow.',
     });
     expect(out.text).toContain(String(out.structured.notice));
+  });
+
+  it('pages by offset in the same order, the last page without next_offset', async () => {
+    boot();
+    const pages = [];
+    for (const offset of [0, 3, 6])
+      pages.push(await call({ description: 'chinese', limit: 3, offset }));
+    expect(pages.flatMap(matched)).toEqual(matched(await call({ description: 'chinese' })));
+    expect(pages[1]?.structured).toMatchObject({ next_offset: 6, truncated: true });
+    expect(pages[2]?.structured).toMatchObject({ totalCount: 9, shown: 3, truncated: false });
+    expect(pages[2]?.structured).not.toHaveProperty('next_offset');
+    expect(pages[2]?.structured).not.toHaveProperty('notice');
+  });
+
+  it('returns an empty page for an offset past the end, with the total', async () => {
+    boot();
+    const out = await call({ description: 'chinese', offset: 9 });
+    expect(out.structured).toMatchObject({
+      mode: 'description',
+      matches: [],
+      totalCount: 9,
+      shown: 0,
+      notice:
+        'Offset 9 is past the 9 matching records; pass an offset below 9, or omit offset to start over.',
+    });
   });
 
   it('puts the exact match on the first page when limit is 1', async () => {
@@ -585,6 +611,16 @@ describe('iana_lookup_language_tag: limit and subtag_type in tag mode', () => {
     expect(positions(out)).toEqual(['language:en', 'region:US']);
   });
 
+  it('says offset was ignored', async () => {
+    boot();
+    const out = await call({ tag: 'en-US', offset: 2 });
+    expect(positions(out)).toEqual(['language:en', 'region:US']);
+    expect(out.structured).not.toHaveProperty('next_offset');
+    expect(out.structured.notice).toBe(
+      'offset applies to description mode only; it was ignored for this exact lookup.',
+    );
+  });
+
   it('gives no notice for a blank subtag_type', async () => {
     boot();
     const out = await call({ tag: 'en-US', subtag_type: '  ' });
@@ -622,6 +658,7 @@ describe('iana_lookup_language_tag: input validation', () => {
     ['limit 0', { description: 'german', limit: 0 }],
     ['limit above 100', { description: 'german', limit: 101 }],
     ['a non-numeric limit', { description: 'german', limit: 'many' }],
+    ['a negative offset', { description: 'german', offset: -1 }],
   ])('rejects %s as invalid arguments, before any fetch', async (_label, input) => {
     const s = boot();
     const out = await call(input);

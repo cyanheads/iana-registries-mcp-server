@@ -252,7 +252,7 @@ describe('iana_lookup_http_field: keyword', () => {
     expect(names(await call({ keyword: 'FOO' }))).toEqual(['Foo', 'Alpha-Foo']);
   });
 
-  it('cuts at limit, discloses it, and counts the full match set', async () => {
+  it('cuts at limit, discloses it, counts the full match set, and names the next offset', async () => {
     boot();
     const out = await call({ keyword: 'example', limit: 2 });
     expect(names(out)).toEqual(['Example-Provisional', 'Example-Deprecated']);
@@ -261,9 +261,47 @@ describe('iana_lookup_http_field: keyword', () => {
       shown: 2,
       cap: 2,
       truncated: true,
+      next_offset: 2,
       notice:
-        'Showing 2 of 6 matching fields; raise limit (max 100) or add words to keyword to narrow.',
+        'Showing 2 of 6 matching fields; pass offset 2 for the next page, raise limit (max 100), or add words to keyword to narrow.',
     });
+  });
+
+  it('pages by offset in the same order, the last page without next_offset', async () => {
+    boot();
+    const pages = [];
+    for (const offset of [0, 2, 4])
+      pages.push(await call({ keyword: 'example', limit: 2, offset }));
+    expect(pages.flatMap(names)).toEqual(names(await call({ keyword: 'example' })));
+    expect(pages[1]?.structured).toMatchObject({
+      next_offset: 4,
+      notice:
+        'Showing 3–4 of 6 matching fields; pass offset 4 for the next page, raise limit (max 100), or add words to keyword to narrow.',
+    });
+    expect(pages[2]?.structured).toMatchObject({ shown: 2, truncated: false });
+    expect(pages[2]?.structured).not.toHaveProperty('next_offset');
+  });
+
+  it('returns an empty page for an offset past the end, still found, with the total', async () => {
+    boot();
+    const out = await call({ keyword: 'example', offset: 6 });
+    expect(out.structured).toMatchObject({
+      found: true,
+      fields: [],
+      totalCount: 6,
+      shown: 0,
+      notice:
+        'Offset 6 is past the 6 matching fields; pass an offset below 6, or omit offset to start over.',
+    });
+  });
+
+  it('ignores offset in name mode and says so', async () => {
+    boot();
+    const out = await call({ name: 'Cache-Status', offset: 1 });
+    expect(names(out)).toEqual(['Cache-Status']);
+    expect(out.structured.notice).toBe(
+      'offset applies to keyword mode only; it was ignored for this exact lookup.',
+    );
   });
 
   it('reads blank optional inputs as unset: keyword mode, no status filter, default limit', async () => {
@@ -295,6 +333,7 @@ describe('iana_lookup_http_field: input validation', () => {
     ['limit 0', { keyword: 'cache', limit: 0 }],
     ['limit above 100', { keyword: 'cache', limit: 101 }],
     ['a non-numeric limit', { keyword: 'cache', limit: 'many' }],
+    ['a negative offset', { keyword: 'cache', offset: -1 }],
   ])('rejects %s as invalid arguments, before any fetch', async (_label, input) => {
     const s = boot();
     const out = await call(input);

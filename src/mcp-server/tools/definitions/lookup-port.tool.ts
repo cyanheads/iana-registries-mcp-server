@@ -14,7 +14,13 @@ import { requireTable } from '@/services/registry/registry-tables.js';
 import { compileQuery, matchesQuery, toSearchText } from '@/services/registry/search-text.js';
 import type { RegistryRecord } from '@/services/registry/types.js';
 import { startCallBudget } from '@/services/upstream/call-budget.js';
-import { discloseList, echo, listEnrichment } from '../shared/list-enrichment.js';
+import {
+  discloseList,
+  echo,
+  offsetIgnored,
+  offsetListEnrichment,
+  offsetPage,
+} from '../shared/list-enrichment.js';
 import {
   datesLine,
   inline,
@@ -27,6 +33,7 @@ import {
   blankAsUnset,
   digitsToNumber,
   limitInput,
+  offsetInput,
   ReferenceSchema,
   SourceSchema,
   searchWords,
@@ -149,6 +156,7 @@ export const lookupPort = tool('iana_lookup_port', {
       'Keep only rows for this transport protocol. Rows without a transport (most range rows and every service name without a port) are always kept. Applies to every mode.',
     ),
     limit: limitInput(100, 25),
+    offset: offsetInput('keyword'),
   }),
   output: z.object({
     mode: z.enum(['port', 'service', 'keyword']).describe('Which lookup ran.'),
@@ -206,7 +214,7 @@ export const lookupPort = tool('iana_lookup_port', {
       ),
     source: SourceSchema,
   }),
-  enrichment: listEnrichment,
+  enrichment: offsetListEnrichment,
   errors: [
     {
       reason: 'mode_required',
@@ -284,6 +292,7 @@ export const lookupPort = tool('iana_lookup_port', {
             `Port ${port} has no row in the IANA port registry.`,
           more &&
             `Showing ${assignments.length} of ${rows.length} rows for port ${port}; raise limit (max 100) to see the rest.`,
+          offsetIgnored(input.offset, 'keyword'),
         ],
       });
       return {
@@ -316,6 +325,7 @@ export const lookupPort = tool('iana_lookup_port', {
             `${service} is registered for ${transportsOf(named)}; the transport filter ${wantedTransport} excludes it.`,
           more &&
             `Showing ${assignments.length} of ${rows.length} rows for service ${service}; raise limit (max 100) to see the rest.`,
+          offsetIgnored(input.offset, 'keyword'),
         ],
       });
       return {
@@ -337,18 +347,24 @@ export const lookupPort = tool('iana_lookup_port', {
       .map(toAssignment)
       .filter(withTransport)
       .sort(byPort);
-    const assignments = rows.slice(0, input.limit);
-    const more = rows.length > assignments.length;
+    const page = offsetPage(rows, {
+      offset: input.offset,
+      limit: input.limit,
+      max: 100,
+      noun: 'matching rows',
+      narrow: 'add words to keyword to narrow',
+    });
+    const assignments = page.items;
     discloseList(ctx.enrich, {
       total: rows.length,
       shown: assignments.length,
       cap: input.limit,
-      more,
+      more: page.nextOffset !== undefined,
+      nextOffset: page.nextOffset,
       fragments: [
         rows.length === 0 &&
           `No assignment matched "${echo(keyword)}"${transportNote}. Try fewer or different words, or pass a port number.`,
-        more &&
-          `Showing ${assignments.length} of ${rows.length} matching rows; raise limit (max 100) or add words to keyword to narrow.`,
+        page.notice,
       ],
     });
     return {

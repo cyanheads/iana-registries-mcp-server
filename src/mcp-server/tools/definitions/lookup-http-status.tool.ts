@@ -18,12 +18,19 @@ import {
 import type { RegistryRecord } from '@/services/registry/types.js';
 import { startCallBudget } from '@/services/upstream/call-budget.js';
 import { upstreamUnreadable } from '@/services/upstream/upstream-client.js';
-import { discloseList, echo, listEnrichment } from '../shared/list-enrichment.js';
+import {
+  discloseList,
+  echo,
+  offsetIgnored,
+  offsetListEnrichment,
+  offsetPage,
+} from '../shared/list-enrichment.js';
 import { datesLine, inline, referenceLines, sourceLines } from '../shared/markdown.js';
 import {
   blankAsUnset,
   digitsToNumber,
   limitInput,
+  offsetInput,
   ReferenceSchema,
   SourceSchema,
   searchWords,
@@ -105,6 +112,7 @@ export const lookupHttpStatus = tool('iana_lookup_http_status', {
       'Words matched as whole tokens against registered reason phrases, e.g. "too many" or "gateway". Pass this or code, not both.',
     ),
     limit: limitInput(100, 25),
+    offset: offsetInput('keyword'),
   }),
   output: z.object({
     mode: z.enum(['code', 'keyword']).describe('Which lookup ran.'),
@@ -146,7 +154,7 @@ export const lookupHttpStatus = tool('iana_lookup_http_status', {
       .describe('For an unassigned code, the registry row it falls in, e.g. "432-450".'),
     source: SourceSchema,
   }),
-  enrichment: listEnrichment,
+  enrichment: offsetListEnrichment,
   errors: [
     {
       reason: 'mode_required',
@@ -197,6 +205,7 @@ export const lookupHttpStatus = tool('iana_lookup_http_status', {
             range
               ? `HTTP ${code} is unassigned (registry range ${inline(range)}); it has no standard meaning.`
               : `HTTP ${code} has no row in the IANA status code registry; it has no standard meaning.`,
+            offsetIgnored(input.offset, 'keyword'),
           ],
         });
         return {
@@ -212,7 +221,7 @@ export const lookupHttpStatus = tool('iana_lookup_http_status', {
         shown: 1,
         cap: input.limit,
         more: false,
-        fragments: [],
+        fragments: [offsetIgnored(input.offset, 'keyword')],
       });
       return {
         mode: 'code' as const,
@@ -237,23 +246,29 @@ export const lookupHttpStatus = tool('iana_lookup_http_status', {
       ...matches.filter((status) => normalizeForSearch(status.phrase) === wanted),
       ...matches.filter((status) => normalizeForSearch(status.phrase) !== wanted),
     ];
-    const statuses = ranked.slice(0, input.limit);
-    const more = ranked.length > statuses.length;
+    const page = offsetPage(ranked, {
+      offset: input.offset,
+      limit: input.limit,
+      max: 100,
+      noun: 'matching status codes',
+      narrow: 'add words to keyword to narrow',
+    });
+    const statuses = page.items;
     discloseList(ctx.enrich, {
       total: ranked.length,
       shown: statuses.length,
       cap: input.limit,
-      more,
+      more: page.nextOffset !== undefined,
+      nextOffset: page.nextOffset,
       fragments: [
         ranked.length === 0 &&
           `No registered status phrase matched "${echo(keyword)}". Codes such as 418 are listed only as (Unused); pass code to see them.`,
-        more &&
-          `Showing ${statuses.length} of ${ranked.length} matching status codes; raise limit (max 100) or add words to keyword to narrow.`,
+        page.notice,
       ],
     });
     return {
       mode: 'keyword' as const,
-      found: statuses.length > 0,
+      found: ranked.length > 0,
       statuses,
       source: loaded.source,
     };

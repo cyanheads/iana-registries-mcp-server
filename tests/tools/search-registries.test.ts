@@ -169,7 +169,7 @@ describe('iana_search_registries: matching', () => {
 });
 
 describe('iana_search_registries: limit and miss', () => {
-  it('cuts at limit, discloses it, and counts the full match set', async () => {
+  it('cuts at limit, discloses it, counts the full match set, and names the next offset', async () => {
     boot();
     const out = await call({ query: 'example protocols', limit: 3 });
     expect(rows(out)).toHaveLength(3);
@@ -178,9 +178,11 @@ describe('iana_search_registries: limit and miss', () => {
       shown: 3,
       cap: 3,
       truncated: true,
-      notice: `Showing 3 of ${SEARCH_ENTRIES.length} matching registries; add words to query to narrow, or raise limit (max 50).`,
+      next_offset: 3,
+      notice: `Showing 3 of ${SEARCH_ENTRIES.length} matching registries; pass offset 3 for the next page, raise limit (max 50), or add words to query to narrow.`,
     });
     expect(out.text).toContain('Showing 3 of 8 matching registries');
+    expect(out.text).toContain('**next_offset:** 3');
   });
 
   it('applies the default cap of 20, a digit-string limit, and the maximum of 50', async () => {
@@ -230,6 +232,78 @@ describe('iana_search_registries: limit and miss', () => {
   });
 });
 
+describe('iana_search_registries: offset paging', () => {
+  it('pages through the matches in one stable order, the last page without next_offset', async () => {
+    boot();
+    const all = ids(await call({ query: 'example protocols', limit: 50 }));
+    const first = await call({ query: 'example protocols', limit: 3 });
+    const second = await call({ query: 'example protocols', limit: 3, offset: 3 });
+    const last = await call({ query: 'example protocols', limit: 3, offset: 6 });
+    expect([...ids(first), ...ids(second), ...ids(last)]).toEqual(all);
+    expect(second.structured).toMatchObject({
+      totalCount: 8,
+      shown: 3,
+      truncated: true,
+      next_offset: 6,
+      notice:
+        'Showing 4–6 of 8 matching registries; pass offset 6 for the next page, raise limit (max 50), or add words to query to narrow.',
+    });
+    expect(last.structured).toMatchObject({ totalCount: 8, shown: 2, truncated: false });
+    expect(last.structured).not.toHaveProperty('next_offset');
+    expect(last.structured).not.toHaveProperty('notice');
+  });
+
+  it('at the maximum limit names the next offset and drops "raise limit"', async () => {
+    boot(indexHtmlWith(500, 2_000));
+    const out = await call({ query: 'category', limit: 50 });
+    expect(rows(out)).toHaveLength(50);
+    expect(out.structured).toMatchObject({
+      totalCount: 2_000,
+      shown: 50,
+      cap: 50,
+      truncated: true,
+      next_offset: 50,
+      notice:
+        'Showing 50 of 2000 matching registries; pass offset 50 for the next page, or add words to query to narrow.',
+    });
+    expect(out.structured.notice).not.toContain('raise limit');
+    const next = await call({ query: 'category', limit: 50, offset: 50 });
+    expect(rows(next)[0]?.title).toBe('R 50');
+    expect(next.structured).toMatchObject({ next_offset: 100 });
+  });
+
+  it('returns an empty page with the total for an offset past the end, not an error', async () => {
+    boot();
+    const out = await call({ query: 'example protocols', offset: 8 });
+    expect(out.isError).toBe(false);
+    expect(out.structured).toMatchObject({
+      registries: [],
+      totalCount: 8,
+      shown: 0,
+      truncated: false,
+      notice:
+        'Offset 8 is past the 8 matching registries; pass an offset below 8, or omit offset to start over.',
+    });
+    expect(out.structured).not.toHaveProperty('next_offset');
+  });
+
+  it('keeps the miss notice for a query with no match at any offset', async () => {
+    boot();
+    const out = await call({ query: 'zzzzqq', offset: 40 });
+    expect(out.structured.notice).toMatch(/^No registry title matched "zzzzqq"\./);
+  });
+
+  it('reads a blank or digit-string offset', async () => {
+    boot();
+    expect(ids(await call({ query: 'example protocols', limit: 3, offset: '  ' }))).toEqual(
+      ids(await call({ query: 'example protocols', limit: 3 })),
+    );
+    expect((await call({ query: 'example protocols', offset: '7' })).structured).toMatchObject({
+      shown: 1,
+    });
+  });
+});
+
 describe('iana_search_registries: input validation', () => {
   it.each([
     ['a missing query', {}],
@@ -240,6 +314,8 @@ describe('iana_search_registries: input validation', () => {
     ['limit above 50', { query: 'cipher', limit: 51 }],
     ['a fractional limit', { query: 'cipher', limit: 1.5 }],
     ['a non-numeric limit', { query: 'cipher', limit: 'many' }],
+    ['a negative offset', { query: 'cipher', offset: -1 }],
+    ['a fractional offset', { query: 'cipher', offset: 2.5 }],
   ])('rejects %s as invalid arguments, before any fetch', async (_label, input) => {
     const s = boot();
     const out = await call(input);

@@ -534,7 +534,7 @@ describe('iana_lookup_port: keyword mode', () => {
     expect(out.structured.totalCount).toBeGreaterThan(0);
   });
 
-  it('cuts at limit with the keyword guidance', async () => {
+  it('cuts at limit with the keyword guidance and the next offset', async () => {
     boot();
     const out = await call({ keyword: 'time', limit: 1 });
     expect(brief(out)).toEqual(['example-time/tcp@37']);
@@ -543,8 +543,38 @@ describe('iana_lookup_port: keyword mode', () => {
       shown: 1,
       cap: 1,
       truncated: true,
+      next_offset: 1,
       notice:
-        'Showing 1 of 4 matching rows; raise limit (max 100) or add words to keyword to narrow.',
+        'Showing 1 of 4 matching rows; pass offset 1 for the next page, raise limit (max 100), or add words to keyword to narrow.',
+    });
+  });
+
+  it('pages by offset in the same order, the last page without next_offset', async () => {
+    boot();
+    const pages = [
+      await call({ keyword: 'time', limit: 2 }),
+      await call({ keyword: 'time', limit: 2, offset: 2 }),
+    ];
+    expect(pages.flatMap(brief)).toEqual(brief(await call({ keyword: 'time' })));
+    expect(pages[0]?.structured).toMatchObject({ next_offset: 2, truncated: true });
+    expect(pages[1]?.structured).toMatchObject({ totalCount: 4, shown: 2, truncated: false });
+    expect(pages[1]?.structured).not.toHaveProperty('next_offset');
+    expect(pages[1]?.structured).not.toHaveProperty('notice');
+  });
+
+  it('returns an empty page with the total for an offset past the end', async () => {
+    boot();
+    const out = await call({ keyword: 'time', offset: 4 });
+    expect(out.isError).toBe(false);
+    expect(out.structured).toMatchObject({
+      mode: 'keyword',
+      found: false,
+      assignments: [],
+      totalCount: 4,
+      shown: 0,
+      truncated: false,
+      notice:
+        'Offset 4 is past the 4 matching rows; pass an offset below 4, or omit offset to start over.',
     });
   });
 
@@ -589,6 +619,8 @@ describe('iana_lookup_port: input validation', () => {
     ['limit 0', { port: 22, limit: 0 }],
     ['limit above 100', { port: 22, limit: 101 }],
     ['a non-numeric limit', { port: 22, limit: 'many' }],
+    ['a negative offset', { keyword: 'time', offset: -1 }],
+    ['a fractional offset', { keyword: 'time', offset: 0.5 }],
   ])('rejects %s as invalid arguments, before any fetch', async (_label, input) => {
     const s = boot();
     const out = await call(input);
@@ -613,6 +645,20 @@ describe('iana_lookup_port: input validation', () => {
     boot();
     const out = await call({ port: '', service: '  ', keyword: 'time', transport: '', limit: ' ' });
     expect(out.structured).toMatchObject({ mode: 'keyword', totalCount: 4, cap: 25 });
+  });
+
+  it.each([
+    ['port', { port: 443 }],
+    ['service', { service: 'ntp' }],
+  ])('ignores offset in %s mode and says so', async (_mode, input) => {
+    boot();
+    const plain = await call(input);
+    const out = await call({ ...input, offset: 3 });
+    expect(rows(out)).toEqual(rows(plain));
+    expect(out.structured).not.toHaveProperty('next_offset');
+    expect(String(out.structured.notice)).toContain(
+      'offset applies to keyword mode only; it was ignored for this exact lookup.',
+    );
   });
 
   it('applies a digit-string limit', async () => {
