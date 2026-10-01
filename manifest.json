@@ -2,7 +2,7 @@
   "manifest_version": "0.3",
   "name": "iana-registries-mcp-server",
   "display_name": "iana-registries-mcp-server",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Look up IANA ports, media types, HTTP status codes and fields, URI schemes, enterprise numbers, and BCP 47 language tags; check RFC status; search and read any IANA registry.",
   "author": { "name": "cyanheads" },
   "repository": { "type": "git", "url": "https://github.com/cyanheads/iana-registries-mcp-server" },
