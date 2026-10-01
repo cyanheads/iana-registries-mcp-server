@@ -83,7 +83,7 @@ export const searchRegistries = tool('iana_search_registries', {
     {
       reason: 'index_unreadable',
       code: JsonRpcErrorCode.ServiceUnavailable,
-      when: 'The protocol index page could not be read, or parsed under the 500-id / 2,000-entry floor, with no good copy up to 7 days old.',
+      when: 'The IANA protocol index page could not be read, or it listed far fewer registries than a complete index holds, and no good copy up to 7 days old is cached.',
       recovery:
         'The IANA registry index could not be read; call iana_get_registry_records directly with a known registry id such as tls-parameters.',
       thrownBy: 'service',
@@ -91,7 +91,7 @@ export const searchRegistries = tool('iana_search_registries', {
     {
       reason: 'pacer_shed',
       code: JsonRpcErrorCode.RateLimited,
-      when: "This server's own iana.org request queue would hold the call longer than its wait budget.",
+      when: "This server's own iana.org request queue is too full for the call to start in time.",
       recovery:
         'Wait the retryAfter seconds given in this error, then call iana_search_registries again.',
       retryable: true,

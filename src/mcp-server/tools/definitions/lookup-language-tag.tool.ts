@@ -14,7 +14,7 @@ import { compileQuery, matchesQuery, normalizeForSearch } from '@/services/regis
 import type { LanguageRecord } from '@/services/registry/types.js';
 import { startCallBudget } from '@/services/upstream/call-budget.js';
 import { discloseList, echo, listEnrichment } from '../shared/list-enrichment.js';
-import { inline, quote, sourceLines } from '../shared/markdown.js';
+import { inline, joinLines, quote, sourceLines } from '../shared/markdown.js';
 import { blankAsUnset, limitInput, SourceSchema, searchWords } from '../shared/schemas.js';
 
 /** Hyphen-separated subtags of 1–8 letters or digits (underscores are converted first). */
@@ -278,7 +278,7 @@ export const lookupLanguageTag = tool('iana_lookup_language_tag', {
     {
       reason: 'pacer_shed',
       code: JsonRpcErrorCode.RateLimited,
-      when: "This server's own iana.org request queue would hold the call longer than its wait budget.",
+      when: "This server's own iana.org request queue is too full for the call to start in time.",
       recovery:
         'Wait the retryAfter seconds given in this error, then call iana_lookup_language_tag again.',
       retryable: true,
@@ -389,6 +389,6 @@ export const lookupLanguageTag = tool('iana_lookup_language_tag', {
       lines.push('', `### ${inline(record.subtag)} · ${record.type}`, ...recordLines(record));
     }
     lines.push('', ...sourceLines(result.source));
-    return [{ type: 'text', text: lines.join('\n') }];
+    return [{ type: 'text', text: joinLines(lines) }];
   },
 });

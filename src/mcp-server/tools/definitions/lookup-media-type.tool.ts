@@ -26,7 +26,15 @@ import {
 import type { RegistryRecord } from '@/services/registry/types.js';
 import { startCallBudget } from '@/services/upstream/call-budget.js';
 import { discloseList, echo, listEnrichment } from '../shared/list-enrichment.js';
-import { datesLine, inline, quote, referenceLines, sourceLines, url } from '../shared/markdown.js';
+import {
+  datesLine,
+  inline,
+  joinLines,
+  quote,
+  referenceLines,
+  sourceLines,
+  url,
+} from '../shared/markdown.js';
 import {
   blankAsUnset,
   limitInput,
@@ -250,7 +258,7 @@ export const lookupMediaType = tool('iana_lookup_media_type', {
     {
       reason: 'pacer_shed',
       code: JsonRpcErrorCode.RateLimited,
-      when: "This server's own iana.org request queue would hold the call longer than its wait budget.",
+      when: "This server's own iana.org request queue is too full for the call to start in time.",
       recovery:
         'Wait the retryAfter seconds given in this error, then call iana_lookup_media_type again.',
       retryable: true,
@@ -374,6 +382,6 @@ export const lookupMediaType = tool('iana_lookup_media_type', {
       }
     }
     lines.push('', ...sourceLines(result.source));
-    return [{ type: 'text', text: lines.join('\n') }];
+    return [{ type: 'text', text: joinLines(lines) }];
   },
 });

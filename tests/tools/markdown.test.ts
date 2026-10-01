@@ -8,6 +8,7 @@ import { describe, expect, it } from 'vitest';
 import {
   datesLine,
   inline,
+  joinLines,
   quote,
   referenceLines,
   sourceLines,
@@ -369,5 +370,22 @@ describe('datesLine', () => {
 
   it('sanitizes a hostile date', () => {
     expect(datesLine({ registered: '[x](y)\n# h' })).toBe(String.raw`**Registered:** \[x\](y) # h`);
+  });
+});
+
+describe('joinLines', () => {
+  it('ends a quote with a blank line before the next server line', () => {
+    expect(joinLines(['**Description:**', quote('one\ntwo'), '**Updated:** 2021-10-01'])).toBe(
+      '**Description:**\n> one\n> two\n\n**Updated:** 2021-10-01',
+    );
+  });
+
+  it('adds nothing where a blank line, another quoted line, or the end already follows', () => {
+    expect(joinLines(['> a', '', '**B:**', '> b', '> c'])).toBe('> a\n\n**B:**\n> b\n> c');
+    expect(joinLines(['plain', 'lines'])).toBe('plain\nlines');
+  });
+
+  it('reads multi-line entries line by line', () => {
+    expect(joinLines(['> a\n**B:** b', '> c\n- item'])).toBe('> a\n\n**B:** b\n> c\n\n- item');
   });
 });

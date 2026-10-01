@@ -166,7 +166,7 @@ export const lookupHttpStatus = tool('iana_lookup_http_status', {
     {
       reason: 'pacer_shed',
       code: JsonRpcErrorCode.RateLimited,
-      when: "This server's own iana.org request queue would hold the call longer than its wait budget.",
+      when: "This server's own iana.org request queue is too full for the call to start in time.",
       recovery:
         'Wait the retryAfter seconds given in this error, then call iana_lookup_http_status again.',
       retryable: true,

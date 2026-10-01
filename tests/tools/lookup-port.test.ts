@@ -511,6 +511,14 @@ describe('iana_lookup_port: keyword mode', () => {
     expect(brief(await call({ keyword: 'whois' }))).toEqual(['whois++/tcp@63']);
   });
 
+  it('matches each part of a camelCase description word', async () => {
+    boot();
+    expect(brief(await call({ keyword: 'sql database' }))).toEqual([
+      'postgresql/tcp@5432',
+      'postgresql/udp@5432',
+    ]);
+  });
+
   it('does not match text outside the name and description (references, notes)', async () => {
     boot();
     expect(brief(await call({ keyword: 'rfc' }))).toEqual([]);

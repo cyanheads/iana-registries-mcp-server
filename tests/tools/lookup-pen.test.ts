@@ -345,6 +345,29 @@ describe('iana_lookup_pen: organization search', () => {
     expect(numbers(await call({ organization: 'reseau demo' }))).toEqual([2, 1]);
   });
 
+  it('finds a camelCase organization by its words and by the joined word', async () => {
+    boot(
+      penText([
+        penRecord(9, 'ciscoSystems'),
+        penRecord(20, 'Cisco Example Networks'),
+        penRecord(30, 'Example Systems Ltd'),
+      ]),
+    );
+    expect(numbers(await call({ organization: 'cisco' }))).toEqual([9, 20]);
+    for (const organization of ['cisco systems', 'ciscosystems', 'ciscoSystems']) {
+      expect(numbers(await call({ organization }))).toEqual([9]);
+    }
+    expect(entries(await call({ organization: 'cisco systems' }))[0]?.organization).toBe(
+      'ciscoSystems',
+    );
+  });
+
+  it('ranks a camelCase organization exact on its joined word', async () => {
+    boot(penText([penRecord(5, 'ciscoSystems Example Lab'), penRecord(9, 'ciscoSystems')]));
+    expect(numbers(await call({ organization: 'ciscosystems' }))).toEqual([9, 5]);
+    expect(numbers(await call({ organization: 'CiscoSystems' }))).toEqual([9, 5]);
+  });
+
   it('never matches or shows a withheld entry, whichever words of its line are searched', async () => {
     boot();
     for (const organization of [

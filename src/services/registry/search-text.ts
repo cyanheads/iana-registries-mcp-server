@@ -2,9 +2,19 @@
  * @fileoverview Strict whole-token keyword matching shared by every search mode:
  * normalize (NFKD, strip diacritics, lowercase, non-alphanumerics → space) and
  * require every query token to appear as a token of the searchable text. No
- * fuzzy fallback.
+ * fuzzy fallback. The searchable text also indexes the parts of a camelCase
+ * word (`ciscoSystems` → `ciscosystems cisco systems`); queries are never split.
  * @module services/registry/search-text
  */
+
+/** A run of characters that separates words. */
+const WORD_GAP = /[^\p{L}\p{M}\p{N}]+/u;
+
+/** A lowercase letter followed by an uppercase one, as in `ciscoSystems`. */
+const CAMEL_PAIR = /\p{Ll}\p{Lu}/u;
+
+/** The position between a lowercase and an uppercase letter. */
+const CAMEL_BOUNDARY = /(?<=\p{Ll})(?=\p{Lu})/u;
 
 /** Normalizes text to space-separated lowercase alphanumeric tokens. */
 export function normalizeForSearch(text: string): string {
@@ -18,10 +28,17 @@ export function normalizeForSearch(text: string): string {
 
 /**
  * Builds the stored form of a searchable string: normalized and padded with one
- * space on each side, so a token test is a single `includes(' tok ')`.
+ * space on each side, so a token test is a single `includes(' tok ')`. Each
+ * camelCase word is indexed joined and split, so `cisco`, `cisco systems`, and
+ * `ciscosystems` all find `ciscoSystems`.
  */
 export function toSearchText(...parts: readonly (string | undefined)[]): string {
-  const normalized = normalizeForSearch(parts.filter(Boolean).join(' '));
+  const text = parts.filter(Boolean).join(' ');
+  const splitWords = text
+    .split(WORD_GAP)
+    .filter((word) => CAMEL_PAIR.test(word))
+    .map((word) => word.split(CAMEL_BOUNDARY).join(' '));
+  const normalized = normalizeForSearch([text, ...splitWords].join(' '));
   return normalized ? ` ${normalized} ` : '';
 }
 

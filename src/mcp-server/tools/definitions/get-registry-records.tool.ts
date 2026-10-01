@@ -28,7 +28,14 @@ import type {
 } from '@/services/registry/types.js';
 import { type CallBudget, startCallBudget } from '@/services/upstream/call-budget.js';
 import { discloseList, echo, listEnrichment } from '../shared/list-enrichment.js';
-import { datesLine, inline, quote, referenceLines, sourceLines } from '../shared/markdown.js';
+import {
+  datesLine,
+  inline,
+  joinLines,
+  quote,
+  referenceLines,
+  sourceLines,
+} from '../shared/markdown.js';
 import {
   blankAsUnset,
   limitInput,
@@ -385,7 +392,7 @@ export const getRegistryRecords = tool('iana_get_registry_records', {
     {
       reason: 'upstream_unreadable',
       code: JsonRpcErrorCode.ServiceUnavailable,
-      when: 'The registry XML could not be read, was not XML, or exceeded the byte ceiling.',
+      when: 'The registry XML could not be read, was not XML, or was larger than this server accepts.',
       recovery:
         'The IANA registry file could not be read; retry iana_get_registry_records in a minute.',
       thrownBy: 'service',
@@ -393,7 +400,7 @@ export const getRegistryRecords = tool('iana_get_registry_records', {
     {
       reason: 'pacer_shed',
       code: JsonRpcErrorCode.RateLimited,
-      when: "This server's own iana.org request queue would hold the call longer than its wait budget.",
+      when: "This server's own iana.org request queue is too full for the call to start in time.",
       recovery:
         'Wait the retryAfter seconds given in this error, then call iana_get_registry_records again.',
       retryable: true,
@@ -569,7 +576,16 @@ export const getRegistryRecords = tool('iana_get_registry_records', {
       : undefined;
 
     const remaining = matches.length - nextOffset;
-    const filterEcho = `${input.value !== undefined ? ` value "${echo(input.value)}" in ${valueField ?? 'the key column'}` : ''}${input.contains !== undefined ? ` containing "${echo(input.contains)}"` : ''}`;
+    const missed = [
+      input.value !== undefined && `has ${inline(valueField ?? 'key')} "${echo(input.value)}"`,
+      input.contains !== undefined && `contains "${echo(input.contains)}"`,
+    ]
+      .filter(Boolean)
+      .join(' and ');
+    const missHint =
+      input.value === undefined
+        ? 'Try fewer or different words.'
+        : `Drop ${input.contains === undefined ? 'value' : 'a filter'}, or check the column names listed in columns.`;
     const mintedFor = typeof cursor?.u === 'string' ? cursor.u : undefined;
     discloseList(ctx.enrich, {
       total: matches.length,
@@ -583,7 +599,7 @@ export const getRegistryRecords = tool('iana_get_registry_records', {
             : `${inline(table.id)} holds no records.`),
         table.records.length > 0 &&
           matches.length === 0 &&
-          `No record in ${inline(table.id)} matched${filterEcho}. Drop a filter, or check the column names listed in columns.`,
+          `No record in ${inline(table.id)} ${missed}. ${missHint}`,
         matches.length > 0 &&
           offset >= matches.length &&
           `The cursor's offset ${offset} is past the ${matches.length} matching records; call again without cursor to start over.`,
@@ -627,7 +643,7 @@ export const getRegistryRecords = tool('iana_get_registry_records', {
       lines.push(`**Registration procedure:** ${inline(result.registration_procedure)}`);
     }
     if (result.description) {
-      lines.push('', '**Description:**', quote(result.description), '');
+      lines.push('', '**Description:**', quote(result.description));
     }
     if (result.references?.length) {
       lines.push('**Registry references:**', ...referenceLines(result.references));
@@ -677,6 +693,6 @@ export const getRegistryRecords = tool('iana_get_registry_records', {
     });
     if (result.next_cursor) lines.push('', `**Next cursor:** \`${result.next_cursor}\``);
     lines.push('', ...sourceLines(result.source));
-    return [{ type: 'text', text: lines.join('\n') }];
+    return [{ type: 'text', text: joinLines(lines) }];
   },
 });

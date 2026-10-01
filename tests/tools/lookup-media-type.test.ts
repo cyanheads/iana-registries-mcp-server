@@ -656,6 +656,15 @@ describe('iana_lookup_media_type: keyword', () => {
     expect(templateFetches(s)).toEqual([]);
   });
 
+  it('matches a camelCase name segment joined and by its parts', async () => {
+    boot();
+    for (const keyword of ['macroenabled', 'macro enabled', 'excel addin macro']) {
+      expect(types(await call({ keyword }))).toEqual([
+        'application/vnd.ms-excel.addin.macroEnabled.12',
+      ]);
+    }
+  });
+
   it('matches the status annotation text as well as the name', async () => {
     boot();
     expect(types(await call({ keyword: 'obsoleted' }))).toEqual([

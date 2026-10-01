@@ -4,9 +4,10 @@
  * names, list items, notice fragments), `quote()` renders free text as a
  * blockquote, `url()` makes a URL safe to print. Both text helpers strip control
  * and bidi characters and leave link, image, and HTML syntax inert.
- * `structuredContent` keeps every upstream field exactly as the service model
- * holds it; a notice, which both surfaces carry, interpolates upstream values
- * through `inline()`.
+ * `joinLines()` assembles a `format()` text so every blockquote ends before the
+ * next server line. `structuredContent` keeps every upstream field exactly as
+ * the service model holds it; a notice, which both surfaces carry, interpolates
+ * upstream values through `inline()`.
  * @module mcp-server/tools/shared/markdown
  */
 
@@ -69,6 +70,21 @@ export function quote(text: string): string {
       `> ${line.replace(/\t/g, ' ').replace(CONTROL_OR_BIDI, '').replace(MARKDOWN_SPECIAL, '\\$&')}`.trimEnd(),
     )
     .join('\n');
+}
+
+/**
+ * Joins `format()` lines into one text, inserting a blank line wherever a quoted
+ * (`>`) line is followed by a non-blank line that is not quoted. Without it, a
+ * server line after a blockquote continues the quote (CommonMark §5.1 laziness)
+ * and renders inside the third-party text.
+ */
+export function joinLines(lines: readonly string[]): string {
+  const joined: string[] = [];
+  for (const line of lines.join('\n').split('\n')) {
+    if (joined.at(-1)?.startsWith('>') && line !== '' && !line.startsWith('>')) joined.push('');
+    joined.push(line);
+  }
+  return joined.join('\n');
 }
 
 /** A URL safe to print bare or inside `<…>`: unsafe characters percent-encoded, controls stripped. */

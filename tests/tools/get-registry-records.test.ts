@@ -611,7 +611,7 @@ describe('iana_get_registry_records: value filter', () => {
     expect(out.text).not.toContain('maintainers@example.org');
   });
 
-  it('explains a zero-hit value filter with the filter echo and the column hint', async () => {
+  it('explains a zero-hit value filter with the key column, the value, and the column hint', async () => {
     boot();
     const out = await alpha({ value: 'zzz' });
     expect(out.structured).toMatchObject({
@@ -620,7 +620,7 @@ describe('iana_get_registry_records: value filter', () => {
       shown: 0,
       truncated: false,
       notice:
-        'No record in alpha matched value "zzz" in value. Drop a filter, or check the column names listed in columns.',
+        'No record in alpha has value "zzz". Drop value, or check the column names listed in columns.',
     });
     expect(out.structured).toHaveProperty('columns', ['value', 'name', 'description', 'file']);
   });
@@ -649,14 +649,24 @@ describe('iana_get_registry_records: contains filter', () => {
     expect(values(await alpha({ value: '1', contains: 'alpha' }))).toEqual(['1']);
     const out = await alpha({ value: '1', contains: 'second' });
     expect(out.structured.notice).toBe(
-      'No record in alpha matched value "1" in value containing "second". Drop a filter, or check the column names listed in columns.',
+      'No record in alpha has value "1" and contains "second". Drop a filter, or check the column names listed in columns.',
     );
+  });
+
+  it('explains a zero-hit contains filter without pointing at the columns', async () => {
+    boot();
+    const out = await alpha({ contains: 'zzzz' });
+    expect(out.structured).toMatchObject({
+      records: [],
+      totalCount: 0,
+      notice: 'No record in alpha contains "zzzz". Try fewer or different words.',
+    });
   });
 
   it('echoes a multi-line filter on one line in the zero-hit notice', async () => {
     boot();
     const out = await alpha({ contains: 'zz\n\n# Pwned qq' });
-    expect(out.structured.notice).toContain('containing "zz # Pwned qq"');
+    expect(out.structured.notice).toContain('contains "zz # Pwned qq"');
   });
 
   it('says the XML publishes no records when the whole registry holds none', async () => {
@@ -693,7 +703,7 @@ describe('iana_get_registry_records: contains filter', () => {
     expect(out.structured).toMatchObject({ records: [], notice: 'empty holds no records.' });
   });
 
-  it('says "the key column" when a table without columns is filtered by value', async () => {
+  it('says "key" when a table without columns is filtered by value', async () => {
     boot(
       'fieldless',
       registryXml({
@@ -703,7 +713,7 @@ describe('iana_get_registry_records: contains filter', () => {
     );
     const out = await call({ registry: 'fieldless', subregistry: 'bare', value: 'x' });
     expect(out.structured.notice).toBe(
-      'No record in bare matched value "x" in the key column. Drop a filter, or check the column names listed in columns.',
+      'No record in bare has key "x". Drop value, or check the column names listed in columns.',
     );
   });
 });

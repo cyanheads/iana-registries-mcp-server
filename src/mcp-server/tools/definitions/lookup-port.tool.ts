@@ -15,7 +15,14 @@ import { compileQuery, matchesQuery, toSearchText } from '@/services/registry/se
 import type { RegistryRecord } from '@/services/registry/types.js';
 import { startCallBudget } from '@/services/upstream/call-budget.js';
 import { discloseList, echo, listEnrichment } from '../shared/list-enrichment.js';
-import { datesLine, inline, quote, referenceLines, sourceLines } from '../shared/markdown.js';
+import {
+  datesLine,
+  inline,
+  joinLines,
+  quote,
+  referenceLines,
+  sourceLines,
+} from '../shared/markdown.js';
 import {
   blankAsUnset,
   digitsToNumber,
@@ -211,14 +218,14 @@ export const lookupPort = tool('iana_lookup_port', {
     {
       reason: 'upstream_unreadable',
       code: JsonRpcErrorCode.ServiceUnavailable,
-      when: 'The port registry file could not be fetched, was over its size ceiling, or parsed to zero records.',
+      when: 'The port registry file could not be fetched, was larger than this server accepts, or parsed to zero records.',
       recovery: 'The IANA registry file could not be read; retry iana_lookup_port in a minute.',
       thrownBy: 'service',
     },
     {
       reason: 'pacer_shed',
       code: JsonRpcErrorCode.RateLimited,
-      when: "This server's own iana.org request queue would hold the call longer than its wait budget.",
+      when: "This server's own iana.org request queue is too full for the call to start in time.",
       recovery:
         'Wait the retryAfter seconds given in this error, then call iana_lookup_port again.',
       retryable: true,
@@ -379,6 +386,6 @@ export const lookupPort = tool('iana_lookup_port', {
       }
     }
     lines.push('', ...sourceLines(result.source));
-    return [{ type: 'text', text: lines.join('\n') }];
+    return [{ type: 'text', text: joinLines(lines) }];
   },
 });

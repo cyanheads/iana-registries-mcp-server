@@ -115,7 +115,7 @@ export const lookupPen = tool('iana_lookup_pen', {
     {
       reason: 'pacer_shed',
       code: JsonRpcErrorCode.RateLimited,
-      when: "This server's own iana.org request queue would hold the call longer than its wait budget.",
+      when: "This server's own iana.org request queue is too full for the call to start in time.",
       recovery: 'Wait the retryAfter seconds given in this error, then call iana_lookup_pen again.',
       retryable: true,
       thrownBy: 'service',
@@ -168,7 +168,8 @@ export const lookupPen = tool('iana_lookup_pen', {
     const matches = model.entries.filter(
       (entry) => entry.state === 'assigned' && matchesQuery(entry.searchText, query),
     );
-    const isExact = (entry: PenEntry) => entry.searchText.trim() === wanted;
+    const isExact = (entry: PenEntry) =>
+      entry.organization !== undefined && normalizeForSearch(entry.organization) === wanted;
     const ranked = [...matches.filter(isExact), ...matches.filter((entry) => !isExact(entry))];
     const enterprises = ranked.slice(0, input.limit).map(toEnterprise);
     const more = ranked.length > enterprises.length;

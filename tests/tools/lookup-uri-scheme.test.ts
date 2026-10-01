@@ -228,7 +228,13 @@ describe('iana_lookup_uri_scheme: keyword', () => {
     expect(names(await call({ keyword: 'encrypted websocket' }))).toEqual(['wss']);
     expect(names(await call({ keyword: 'mailto' }))).toEqual(['mailto']);
     expect(names(await call({ keyword: 'shttp' }))).toEqual(['shttp']);
-    expect(names(await call({ keyword: 'socket' }))).toEqual([]);
+    expect(names(await call({ keyword: 'sock' }))).toEqual([]);
+  });
+
+  it('matches each part of a camelCase description word', async () => {
+    boot();
+    expect(names(await call({ keyword: 'socket' }))).toEqual(['ws', 'wss']);
+    expect(names(await call({ keyword: 'web socket' }))).toEqual(['ws', 'wss']);
   });
 
   it('lists matches in registry order', async () => {

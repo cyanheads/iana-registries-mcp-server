@@ -35,6 +35,26 @@ describe('toSearchText', () => {
     expect(toSearchText(undefined, '')).toBe('');
     expect(toSearchText('---', '!!')).toBe('');
   });
+
+  it('adds the split form of a word holding a lower-to-upper boundary, keeping the joined word', () => {
+    expect(toSearchText('ciscoSystems')).toBe(' ciscosystems cisco systems ');
+    expect(toSearchText('Acme ciscoSystems, Inc.')).toBe(' acme ciscosystems inc cisco systems ');
+    expect(toSearchText('vnd.ms-excel.sheet.macroEnabled.12')).toBe(
+      ' vnd ms excel sheet macroenabled 12 macro enabled ',
+    );
+  });
+
+  it('indexes a very long word in linear time', () => {
+    const long = 'a'.repeat(200_000);
+    expect(toSearchText(long)).toBe(` ${long} `);
+    expect(toSearchText(`${long}B`)).toBe(` ${long}b ${long} b `);
+  });
+
+  it('adds nothing for text without a lower-to-upper boundary', () => {
+    expect(toSearchText('ACME Corp', 'Example-Org 2', 'HTTP2 x86')).toBe(
+      ' acme corp example org 2 http2 x86 ',
+    );
+  });
 });
 
 describe('compileQuery and matchesQuery', () => {
@@ -71,5 +91,13 @@ describe('compileQuery and matchesQuery', () => {
 
   it('ignores case and diacritics on both sides', () => {
     expect(matchesQuery(toSearchText('Éclair'), compileQuery('ECLAIR'))).toBe(true);
+  });
+
+  it('matches a camelCase word by its parts and by the joined word', () => {
+    const camel = toSearchText('ciscoSystems');
+    for (const words of ['cisco', 'systems', 'cisco systems', 'ciscosystems', 'ciscoSystems']) {
+      expect(matchesQuery(camel, compileQuery(words))).toBe(true);
+    }
+    expect(matchesQuery(camel, compileQuery('cisc'))).toBe(false);
   });
 });

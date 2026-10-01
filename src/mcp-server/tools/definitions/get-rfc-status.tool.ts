@@ -397,7 +397,7 @@ export const getRfcStatus = tool('iana_get_rfc_status', {
     {
       reason: 'pacer_shed',
       code: JsonRpcErrorCode.RateLimited,
-      when: "This server's own RFC Editor or Datatracker request queue would hold every id longer than its wait budget.",
+      when: "This server's own RFC Editor or Datatracker request queue is too full for any id to start in time.",
       recovery:
         'Wait the retryAfter seconds given in this error, then call iana_get_rfc_status again.',
       retryable: true,
