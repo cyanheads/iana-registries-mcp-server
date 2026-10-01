@@ -1,6 +1,7 @@
 /**
  * @fileoverview Email-shaped token handling. Text that reaches a model has
- * `@`-form addresses and `mailto:` URIs replaced; a PEN organization line holding
+ * `@`-form addresses and `mailto:` URIs replaced, except YANG module file names
+ * (`<module>@YYYY-MM-DD.yang`, RFC 7950 §5.2); a PEN organization line holding
  * an address in either the `@` form or IANA's `&` substitution is withheld whole.
  * @module services/registry/personal-data
  */
@@ -15,10 +16,19 @@ const EMAIL_OR_MAILTO = new RegExp(String.raw`mailto:[^\s<>"'()\[\]]+|${LOCAL}@$
 const AT_FORM = new RegExp(`${LOCAL}@${DOMAIN}`);
 const AMP_FORM = new RegExp(`${LOCAL}&${DOMAIN}`);
 
-/** Replaces `@`-form addresses and `mailto:` URIs with {@link EMAIL_PLACEHOLDER}. */
+/** The part after `@` in a YANG module revision file name. */
+const YANG_REVISION_FILE = /@\d{4}-\d{2}-\d{2}\.yang$/;
+
+/**
+ * Replaces `@`-form addresses and `mailto:` URIs with {@link EMAIL_PLACEHOLDER}.
+ * A YANG module file name (`ietf-example@2026-01-01.yang`) is a file, not an
+ * address, and is kept.
+ */
 export function scrubEmails(text: string): string {
   if (!text.includes('@') && !/mailto:/i.test(text)) return text;
-  return text.replace(EMAIL_OR_MAILTO, EMAIL_PLACEHOLDER);
+  return text.replace(EMAIL_OR_MAILTO, (token) =>
+    !/^mailto:/i.test(token) && YANG_REVISION_FILE.test(token) ? token : EMAIL_PLACEHOLDER,
+  );
 }
 
 /** True when the text holds an address in the `@` form or IANA's `local&domain.tld` form. */

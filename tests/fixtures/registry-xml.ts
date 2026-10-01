@@ -215,7 +215,50 @@ export const LEGACY_STUB_XML = `${XML_DECLARATION}
 </registry>
 `;
 
-/** A well-formed registry with a title but no records, sub-registries, or legacy pointer. */
+/**
+ * A record-less registry in the shape of IANA's YANG module registries: title,
+ * category, rule, a description whose xrefs point at a sibling registry and the
+ * module file (named `<module>@<revision>.yang`), a reference, and people.
+ */
+export const YANG_MODULE_XML = `${XML_DECLARATION}
+<registry ${NS} id="example-yang-algs">
+  <title>YANG Module Example Algorithms</title>
+  <category>YANG Module Example</category>
+  <created>2024-01-01</created>
+  <updated>2026-09-01</updated>
+  <registration_rule>Expert Review</registration_rule>
+  <description>This module mirrors the
+<xref type="registry" data="example-parameters">Example Parameters</xref> registry.
+Module file: <xref type="uri" data="https://www.iana.org/assignments/yang-parameters/example-yang-algs@2026-09-01.yang"/>
+Questions go to person@example.org.</description>
+  <xref type="rfc" data="rfc9999"/>
+  <people>
+    <person id="Example_Person"><name>Example Person</name><uri>mailto:person@example.org</uri></person>
+  </people>
+</registry>
+`;
+
+/** A registry of sub-registries that each point at a MIB module file and hold no records. */
+export const MIB_MODULES_XML = `${XML_DECLARATION}
+<registry ${NS} id="example-mib-modules">
+  <title>Example MIB Modules</title>
+  <updated>2026-09-01</updated>
+  <registry id="example-one-mib">
+    <title>EXAMPLE-ONE-MIB</title>
+    <xref type="rfc" data="rfc9998"/>
+    <registration_rule>Expert Review</registration_rule>
+    <expert>Example Expert</expert>
+    <file type="mib">example-one-mib</file>
+  </registry>
+  <registry id="example-two-mib">
+    <title>EXAMPLE-TWO-MIB</title>
+    <registration_rule>IETF Review</registration_rule>
+    <file type="mib">example-two-mib</file>
+  </registry>
+</registry>
+`;
+
+/** A well-formed registry with a title but no records, sub-registries, or file pointer. */
 export const EMPTY_XML = `${XML_DECLARATION}
 <registry ${NS} id="example-empty">
   <title>Example Empty Registry</title>

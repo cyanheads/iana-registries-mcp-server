@@ -70,13 +70,23 @@ export interface RegistryRecord {
   valueField?: string;
 }
 
+/** A table-level `<file>`: content IANA publishes outside the XML records. */
+export interface RegistryFile {
+  /** The `type` attribute, e.g. `legacy` (a plain-text registry) or `mib` (a MIB module). */
+  type?: string;
+  /** Resolved the way IANA's registry stylesheet links it. */
+  url: string;
+}
+
 /** A registry's root level or one nested `<registry>`: the unit records live in. */
 export interface RegistryTable {
   /** Element names seen across the table's records, first-seen order (xref excluded). */
   columns: string[];
+  /** `<description>`, mixed content flattened. */
+  description?: string;
+  /** Table-level `<file>` pointers, direct or inside `<files>`, in document order. */
+  files: RegistryFile[];
   id: string;
-  /** `<file type="legacy">` text when this table is a stub pointing at a plain-text file. */
-  legacyFile?: string;
   notes: RegistryNote[];
   /** Id of the enclosing nested registry, for tables nested more than one level deep. */
   parentId?: string;
@@ -94,8 +104,6 @@ export interface RegistryTable {
 export interface XmlRegistry {
   category?: string;
   id: string;
-  /** `<file type="legacy">` at the root: the registry is published only as plain text. */
-  legacyFile?: string;
   /** Records in the whole file, root and every sub-registry. */
   recordCount: number;
   /** Root-level rule, references, notes, ranges, and records (`id` = registry id). */

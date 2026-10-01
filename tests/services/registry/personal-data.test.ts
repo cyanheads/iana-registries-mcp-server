@@ -46,6 +46,22 @@ describe('scrubEmails', () => {
     const once = scrubEmails('x person@example.org y');
     expect(scrubEmails(once)).toBe(once);
   });
+
+  it('keeps a YANG module file name (<module>@YYYY-MM-DD.yang)', () => {
+    const link =
+      'https://www.iana.org/assignments/yang-parameters/example-yang-algs@2026-09-01.yang';
+    expect(scrubEmails(`Module file: ${link}.`)).toBe(`Module file: ${link}.`);
+    expect(scrubEmails('example-module@2026-01-01.yang')).toBe('example-module@2026-01-01.yang');
+  });
+
+  it('still scrubs an address beside a YANG file name, and one whose domain only starts like one', () => {
+    expect(scrubEmails('example-module@2026-01-01.yang or person@example.org')).toBe(
+      `example-module@2026-01-01.yang or ${EMAIL_PLACEHOLDER}`,
+    );
+    expect(scrubEmails('a@2026-01-01.yang.example.org')).toBe(EMAIL_PLACEHOLDER);
+    expect(scrubEmails('a@26-01-01.yang')).toBe(EMAIL_PLACEHOLDER);
+    expect(scrubEmails('mailto:a@2026-01-01.yang')).toBe(EMAIL_PLACEHOLDER);
+  });
 });
 
 describe('hasEmailToken', () => {

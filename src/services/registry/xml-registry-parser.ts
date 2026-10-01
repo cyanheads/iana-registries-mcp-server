@@ -1,9 +1,10 @@
 /**
  * @fileoverview Parses one IANA registry XML file into the generic model:
  * registry and sub-registry tables, records keyed by element name, notes,
- * registration ranges, and normalized references. Mixed content is flattened;
- * person data (`<people>`, `<expert>`, `<assignee>`, `<contact>`, person xrefs at
- * any depth) is dropped by structure and never parsed into the model.
+ * registration ranges, descriptions, file pointers, and normalized references.
+ * Mixed content is flattened; person data (`<people>`, `<expert>`, `<assignee>`,
+ * `<contact>`, person xrefs at any depth) is dropped by structure and never
+ * parsed into the model.
  * @module services/registry/xml-registry-parser
  */
 
@@ -14,6 +15,7 @@ import { normalizeForSearch, toSearchText } from './search-text.js';
 import type {
   Reference,
   RegistrationRange,
+  RegistryFile,
   RegistryNote,
   RegistryRecord,
   RegistryTable,
@@ -291,11 +293,35 @@ function parseRecord(node: XNode, columns: Set<string>): RegistryRecord {
   };
 }
 
+const ASSIGNMENTS = 'https://www.iana.org/assignments/';
+
+const encodePath = (path: string) => path.split('/').map(encodeURIComponent).join('/');
+
+/**
+ * Links one `<file>` the way IANA's registry stylesheet does: an absolute URL as
+ * given (a protocol-relative one on https), a MIB module at
+ * `/assignments/<name>`, a file naming a `registry` under that registry, and any
+ * other file under the root registry.
+ */
+function parseFile(node: XNode, rootId: string): RegistryFile | undefined {
+  const text = flatten(childrenOf(node, 'file'));
+  if (!text) return;
+  const { type, registry } = attrsOf(node);
+  let url: string;
+  if (/^https?:\/\//i.test(text)) url = text;
+  else if (text.startsWith('//')) url = `https:${text}`;
+  else if (type === 'mib') url = `${ASSIGNMENTS}${encodePath(text)}`;
+  else url = `${ASSIGNMENTS}${encodeURIComponent(registry?.trim() || rootId)}/${encodePath(text)}`;
+  return { ...(type ? { type } : {}), url };
+}
+
 interface TableWalk {
   /** Category text, read at the root only. */
   category?: string;
   /** Nested tables collected depth-first in document order. */
   nested: RegistryTable[];
+  /** The root `<registry id>`, which relative file pointers resolve under. */
+  rootId: string;
 }
 
 /**
@@ -313,6 +339,7 @@ function parseTable(
     id,
     title: '',
     columns: [],
+    files: [],
     notes: [],
     ranges: [],
     records: [],
@@ -345,6 +372,11 @@ function parseTable(
         if (rule) table.registrationRule = rule;
         break;
       }
+      case 'description': {
+        const description = flatten(childrenOf(child, tag));
+        if (description) table.description = description;
+        break;
+      }
       case 'xref': {
         const ref = referenceFrom(child);
         if (ref) table.references.push(ref);
@@ -372,9 +404,11 @@ function parseTable(
         );
         break;
       case 'file':
-        if (attrsOf(child).type === 'legacy') {
-          const file = flatten(childrenOf(child, tag));
-          if (file) table.legacyFile = file;
+      case 'files':
+        for (const fileNode of tag === 'file' ? [child] : childrenOf(child, tag)) {
+          if (tagOf(fileNode) !== 'file') continue;
+          const file = parseFile(fileNode, walk.rootId);
+          if (file) table.files.push(file);
         }
         break;
     }
@@ -383,11 +417,43 @@ function parseTable(
   return table;
 }
 
+function holdsRecord(node: XNode): boolean {
+  const tag = tagOf(node);
+  if (tag === undefined || tag === TEXT) return false;
+  return tag === 'record' || childrenOf(node, tag).some(holdsRecord);
+}
+
+/** The root's closing tag, then only whitespace. */
+const ROOT_CLOSED = /<\/registry\s*>\s*$/;
+
+/**
+ * Accepts a file with no records only when nothing points at a broken read. The
+ * parser is lenient: it reads a cut-off body as a titled registry, and an
+ * unclosed element swallows the records after it. So the body must end with
+ * the root's closing tag, the root must carry a title, and no `<record>` may
+ * sit anywhere in the tree.
+ */
+function assertRecordless(xml: string, url: string, root: RegistryTable, rootNode: XNode): void {
+  if (!ROOT_CLOSED.test(xml)) {
+    throw upstreamUnreadable(
+      `${url} parsed to zero records and does not end with its </registry> closing tag.`,
+      { url },
+    );
+  }
+  if (!root.title) {
+    throw upstreamUnreadable(`${url} parsed to zero records and has no registry title.`, { url });
+  }
+  if (holdsRecord(rootNode)) {
+    throw upstreamUnreadable(`${url} parsed to zero records although it holds <record> elements.`, {
+      url,
+    });
+  }
+}
+
 /**
  * Parses an IANA registry XML file. Throws `upstream_unreadable` when the body
- * declares a DOCTYPE (entity expansion stays off), is not well-formed, has no
- * `<registry>` root, or holds no records, no sub-registries, and no legacy-file
- * pointer.
+ * declares a DOCTYPE (entity expansion stays off), fails to parse, has no
+ * `<registry>` root, or holds no records and fails the record-less checks.
  */
 export function parseXmlRegistry(xml: string, url: string): XmlRegistry {
   const rootStart = xml.indexOf('<registry');
@@ -403,15 +469,13 @@ export function parseXmlRegistry(xml: string, url: string): XmlRegistry {
   const rootNode = document.find((node) => tagOf(node) === 'registry');
   if (!rootNode) throw upstreamUnreadable(`${url} has no <registry> root element.`, { url });
 
-  const walk: TableWalk = { nested: [] };
+  const walk: TableWalk = { nested: [], rootId: attrsOf(rootNode).id ?? '' };
   const root = parseTable(rootNode, walk, { isRoot: true });
   const recordCount = walk.nested.reduce(
     (sum, table) => sum + table.records.length,
     root.records.length,
   );
-  if (recordCount === 0 && walk.nested.length === 0 && !root.legacyFile) {
-    throw upstreamUnreadable(`${url} parsed to zero records.`, { url });
-  }
+  if (recordCount === 0) assertRecordless(xml, url, root, rootNode);
 
   return {
     id: root.id,
@@ -421,6 +485,5 @@ export function parseXmlRegistry(xml: string, url: string): XmlRegistry {
     recordCount,
     ...(walk.category ? { category: walk.category } : {}),
     ...(root.updated ? { updated: root.updated } : {}),
-    ...(root.legacyFile ? { legacyFile: root.legacyFile } : {}),
   };
 }

@@ -388,14 +388,21 @@ describe('findRegistry (generic registries)', () => {
     const s = setup();
     s.state.answer = () => xmlResponse(LEGACY_STUB_XML);
     const loaded = await s.store.findRegistry('example-legacy', s.budget());
-    expect(loaded?.model).toMatchObject({ recordCount: 0, legacyFile: 'example-legacy.txt' });
+    expect(loaded?.model).toMatchObject({ recordCount: 0 });
+    expect(loaded?.model.root.files).toEqual([
+      {
+        type: 'legacy',
+        url: 'https://www.iana.org/assignments/example-legacy/example-legacy.txt',
+      },
+    ]);
   });
 
-  it('rejects a generic file with no records, sub-registries or legacy pointer', async () => {
+  it('returns a titled, well-formed generic file with no records after one fetch', async () => {
     const s = setup();
     s.state.answer = () => xmlResponse(EMPTY_XML);
-    const { error } = await settle(() => s.store.findRegistry('example-empty', s.budget()));
-    expect(asMcpError(error).data).toMatchObject({ reason: 'upstream_unreadable' });
+    const loaded = await s.store.findRegistry('example-empty', s.budget());
+    expect(loaded?.model).toMatchObject({ id: 'example-empty', recordCount: 0 });
+    expect(s.fetches()).toBe(1);
   });
 
   it('a generic 304 with no cached copy is unreadable, not missing', async () => {

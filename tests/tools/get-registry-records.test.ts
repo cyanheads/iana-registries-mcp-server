@@ -36,10 +36,12 @@ import {
   EMPTY_SUBREGISTRY_XML,
   EMPTY_XML,
   LEGACY_STUB_XML,
+  MIB_MODULES_XML,
   NESTED_XML,
   PERSON_MARKERS,
   PORTS_XML,
   WRONG_ROOT_XML,
+  YANG_MODULE_XML,
 } from '../fixtures/registry-xml.js';
 import { searchIndexHtml } from '../fixtures/search-index.js';
 import { describeFailureContract } from '../shared/failure-contract.js';
@@ -657,22 +659,51 @@ describe('iana_get_registry_records: contains filter', () => {
     expect(out.structured.notice).toContain('containing "zz # Pwned qq"');
   });
 
-  it('reports "holds no records" when the table is empty and no filter is set', async () => {
+  it('says the XML publishes no records when the whole registry holds none', async () => {
     boot('example-hollow', EMPTY_SUBREGISTRY_XML);
     const out = await call({ registry: 'example-hollow', subregistry: 'hollow-1' });
     expect(out.structured).toMatchObject({
       records: [],
       totalCount: 0,
-      notice: 'hollow-1 holds no records.',
+      notice: 'hollow-1 publishes no records in its XML.',
     });
     expect(out.structured).not.toHaveProperty('value_field');
   });
 
-  it('says "the key column" when a table without columns is filtered by value', async () => {
+  it('reports an empty table, not a filter miss, when the table is empty and filters are set', async () => {
     boot('example-hollow', EMPTY_SUBREGISTRY_XML);
-    const out = await call({ registry: 'example-hollow', subregistry: 'hollow-1', value: 'x' });
+    const out = await call({
+      registry: 'example-hollow',
+      subregistry: 'hollow-1',
+      value: 'x',
+      contains: 'word',
+    });
+    expect(out.structured.notice).toBe('hollow-1 publishes no records in its XML.');
+  });
+
+  it('reports "holds no records" for an empty table in a registry that has records elsewhere', async () => {
+    boot(
+      'half-hollow',
+      registryXml({
+        id: 'half-hollow',
+        body: `${subregistryXml('full', recordXml({ value: '1' }))}${subregistryXml('empty', '')}`,
+      }),
+    );
+    const out = await call({ registry: 'half-hollow', subregistry: 'empty', value: '1' });
+    expect(out.structured).toMatchObject({ records: [], notice: 'empty holds no records.' });
+  });
+
+  it('says "the key column" when a table without columns is filtered by value', async () => {
+    boot(
+      'fieldless',
+      registryXml({
+        id: 'fieldless',
+        body: subregistryXml('bare', '<record><xref type="rfc" data="rfc9999"/></record>'),
+      }),
+    );
+    const out = await call({ registry: 'fieldless', subregistry: 'bare', value: 'x' });
     expect(out.structured.notice).toBe(
-      'No record in hollow-1 matched value "x" in the key column. Drop a filter, or check the column names listed in columns.',
+      'No record in bare matched value "x" in the key column. Drop a filter, or check the column names listed in columns.',
     );
   });
 });
@@ -1321,10 +1352,51 @@ describe('iana_get_registry_records: non_xml_registry', () => {
       }),
     );
     const out = await call({ registry: 'sub-legacy' });
-    expect(errorOf(out).data).toMatchObject({
-      reason: 'non_xml_registry',
-      file: 'https://www.iana.org/assignments/sub-legacy/inner.txt',
+    const file = 'https://www.iana.org/assignments/sub-legacy/inner.txt';
+    expect(errorOf(out)).toMatchObject({
+      message: `inner is published only as plain text (${file}); its XML file holds no records.`,
+      data: { reason: 'non_xml_registry', registry: 'sub-legacy', subregistry: 'inner', file },
     });
+  });
+
+  it('points a MIB module sub-registry at its module file, after one fetch', async () => {
+    const s = boot('example-mib-modules', MIB_MODULES_XML);
+    const out = await call({ registry: 'example-mib-modules', subregistry: 'example-one-mib' });
+    const file = 'https://www.iana.org/assignments/example-one-mib';
+    expect(out.isError).toBe(true);
+    expect(errorOf(out)).toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      message: `example-one-mib is published as a MIB module (${file}); its XML file holds no records.`,
+      data: {
+        reason: 'non_xml_registry',
+        registry: 'example-mib-modules',
+        subregistry: 'example-one-mib',
+        file,
+        recovery: { hint: stubHint(file) },
+      },
+    });
+    expect(out.text).toContain(`Recovery: ${stubHint(file)}`);
+    expect(s.fetched()).toEqual([registryXmlUrl('example-mib-modules')]);
+  });
+
+  it('lists MIB module sub-registries when none is chosen', async () => {
+    boot('example-mib-modules', MIB_MODULES_XML);
+    const out = await call({ registry: 'example-mib-modules' });
+    expect(out.isError).toBe(false);
+    expect(out.structured).toMatchObject({
+      records: [],
+      subregistries: [
+        { id: 'example-one-mib', title: 'EXAMPLE-ONE-MIB', record_count: 0 },
+        { id: 'example-two-mib', title: 'EXAMPLE-TWO-MIB', record_count: 0 },
+      ],
+    });
+  });
+
+  it('names a pointer of any other type as a separate file', async () => {
+    boot('tmpl-only', registryXml({ id: 'tmpl-only', body: '<file type="template">t/x</file>' }));
+    expect(errorOf(await call({ registry: 'tmpl-only' })).message).toBe(
+      'tmpl-only is published as a separate file (https://www.iana.org/assignments/tmpl-only/t/x); its XML file holds no records.',
+    );
   });
 
   it('serves records when the registry also carries a legacy pointer', async () => {
@@ -1336,6 +1408,93 @@ describe('iana_get_registry_records: non_xml_registry', () => {
       }),
     );
     expect(values(await call({ registry: 'mixed-legacy' }))).toEqual(['1']);
+  });
+});
+
+describe('iana_get_registry_records: record-less registries', () => {
+  const MODULE_LINK =
+    'https://www.iana.org/assignments/yang-parameters/example-yang-algs@2026-09-01.yang';
+
+  it('returns a YANG module registry: rule, description, references, no records, one fetch', async () => {
+    const s = boot('example-yang-algs', YANG_MODULE_XML);
+    const out = await call({ registry: 'example-yang-algs' });
+    expect(out.isError).toBe(false);
+    expect(out.structured).toMatchObject({
+      registry_id: 'example-yang-algs',
+      registry_title: 'YANG Module Example Algorithms',
+      registration_procedure: 'Expert Review',
+      description: [
+        'This module mirrors the',
+        'Example Parameters (example-parameters) registry.',
+        `Module file: ${MODULE_LINK}`,
+        'Questions go to [email removed].',
+      ].join('\n'),
+      references: [
+        { type: 'rfc', id: 'RFC 9999', url: 'https://www.rfc-editor.org/rfc/rfc9999.html' },
+      ],
+      notes: [],
+      columns: [],
+      records: [],
+      totalCount: 0,
+      shown: 0,
+      truncated: false,
+      notice: 'example-yang-algs publishes no records in its XML.',
+      source: { registry_id: 'example-yang-algs', registry_updated: '2026-09-01' },
+    });
+    expect(out.structured).not.toHaveProperty('subregistries');
+    expect(s.fetched()).toEqual([registryXmlUrl('example-yang-algs')]);
+  });
+
+  it('renders the description as a quote after the registration procedure', async () => {
+    boot('example-yang-algs', YANG_MODULE_XML);
+    const lines = (await call({ registry: 'example-yang-algs' })).text.split('\n');
+    const at = lines.indexOf('**Description:**');
+    expect(at).toBeGreaterThan(lines.indexOf('**Registration procedure:** Expert Review'));
+    expect(lines.slice(at + 1, at + 6)).toEqual([
+      '> This module mirrors the',
+      '> Example Parameters (example-parameters) registry.',
+      `> Module file: ${MODULE_LINK}`,
+      String.raw`> Questions go to \[email removed\].`,
+      '',
+    ]);
+  });
+
+  it('keeps every person marker out of both surfaces', async () => {
+    boot('example-yang-algs', YANG_MODULE_XML);
+    const out = await call({ registry: 'example-yang-algs' });
+    const surfaces = `${JSON.stringify(out.structured)}\n${out.text}`;
+    for (const marker of PERSON_MARKERS) expect(surfaces).not.toContain(marker);
+  });
+
+  it('reads a titled registry with nothing in it as an empty table', async () => {
+    boot('example-empty', EMPTY_XML);
+    const out = await call({ registry: 'example-empty' });
+    expect(out.structured).toMatchObject({
+      registry_title: 'Example Empty Registry',
+      records: [],
+      notice: 'example-empty publishes no records in its XML.',
+    });
+  });
+
+  it('tells the caller to omit subregistry when the registry has no sub-registries', async () => {
+    boot('example-yang-algs', YANG_MODULE_XML);
+    const out = await call({ registry: 'example-yang-algs', subregistry: 'example-yang-algs-1' });
+    const hint =
+      'example-yang-algs has no sub-registries; call iana_get_registry_records again without subregistry.';
+    expect(errorOf(out)).toMatchObject({
+      code: JsonRpcErrorCode.NotFound,
+      data: { reason: 'unknown_subregistry', subregistries: [], recovery: { hint } },
+    });
+    expect(out.text).toContain(`Recovery: ${hint}`);
+  });
+
+  it('reads the root when a URL fragment names the registry itself', async () => {
+    boot('example-yang-algs', YANG_MODULE_XML);
+    const out = await call({
+      registry: 'https://www.iana.org/assignments/example-yang-algs#example-yang-algs',
+    });
+    expect(out.isError).toBe(false);
+    expect(out.structured.notice).toBe('example-yang-algs publishes no records in its XML.');
   });
 });
 
@@ -1497,9 +1656,10 @@ describeFailureContract({
     },
     { label: 'a DOCTYPE', attempts: 3, response: () => xmlResponse(DOCTYPE_XML) },
     {
-      label: 'a registry with no records, sub-registries, or legacy pointer',
+      label: 'a record-less registry with no title',
       attempts: 3,
-      response: () => xmlResponse(EMPTY_XML),
+      response: () =>
+        xmlResponse('<registry id="example-parameters"><updated>2026-01-01</updated></registry>'),
     },
   ],
 });

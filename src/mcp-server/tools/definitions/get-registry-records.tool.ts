@@ -158,15 +158,15 @@ function filterKey(parts: readonly string[]): string {
   return (hash >>> 0).toString(36);
 }
 
-/** The legacy plain-text file a stub registry points at, when it is one. */
-function legacyFileUrl(registry: XmlRegistry): string | undefined {
-  if (registry.recordCount > 0) return;
-  const file =
-    registry.legacyFile ?? tablesOf(registry).find((table) => table.legacyFile)?.legacyFile;
-  if (!file) return;
-  if (/^https?:\/\//.test(file)) return file;
-  const segments = file.split('/').map(encodeURIComponent).join('/');
-  return `https://www.iana.org/assignments/${encodeURIComponent(registry.id)}/${segments}`;
+/** A table with no records that points at a file published outside the XML. */
+const fileOnly = (table: RegistryTable) => table.records.length === 0 && table.files.length > 0;
+
+/** How a file-only table is published, by its first file's type. */
+function publishedAs(table: RegistryTable): string {
+  const type = table.files[0]?.type;
+  if (type === 'legacy') return 'only as plain text';
+  if (type === 'mib') return 'as a MIB module';
+  return 'as a separate file';
 }
 
 /**
@@ -257,6 +257,12 @@ export const getRegistryRecords = tool('iana_get_registry_records', {
       .optional()
       .describe(
         'Registration rule of the table read (or of the registry, when listing sub-registries).',
+      ),
+    description: z
+      .string()
+      .optional()
+      .describe(
+        'Description of the table read (or of the registry, when listing sub-registries). A registry with no records, such as a YANG module registry, can name its module file here.',
       ),
     references: z
       .array(ReferenceSchema)
@@ -355,9 +361,9 @@ export const getRegistryRecords = tool('iana_get_registry_records', {
     {
       reason: 'non_xml_registry',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'The registry is published only as a plain-text file, with no XML records.',
+      when: 'The registry, or the sub-registry read, holds no XML records and points at a file published separately, such as plain text or a MIB module.',
       recovery:
-        'This registry is published only as plain text; for language subtags call iana_lookup_language_tag, for enterprise numbers call iana_lookup_pen, otherwise call iana_search_registries for a related XML registry.',
+        'This registry is published outside its XML; for language subtags call iana_lookup_language_tag, for enterprise numbers call iana_lookup_pen, otherwise read the file named in this error or call iana_search_registries for a related XML registry.',
       severity: 'notice',
     },
     {
@@ -433,21 +439,6 @@ export const getRegistryRecords = tool('iana_get_registry_records', {
     }
     const { model, source } = loaded;
 
-    const legacyFile = legacyFileUrl(model);
-    if (legacyFile) {
-      throw ctx.fail(
-        'non_xml_registry',
-        `${inline(model.id)} is published only as plain text (${inline(legacyFile)}); its XML file holds no records.`,
-        {
-          registry: model.id,
-          file: legacyFile,
-          recovery: {
-            hint: `Read ${inline(legacyFile)} directly, or call iana_search_registries for a related XML registry.`,
-          },
-        },
-      );
-    }
-
     const tables = tablesOf(model);
     const selectable = tables.filter((table) => table !== model.root || table.records.length > 0);
     const requestedSub = input.subregistry ?? target.fragment;
@@ -465,15 +456,37 @@ export const getRegistryRecords = tool('iana_get_registry_records', {
             subregistry: requestedSub,
             subregistries: ids,
             recovery: {
-              hint: `Call iana_get_registry_records again with subregistry set to one of: ${ids.map(inline).join(', ')}.`,
+              hint:
+                ids.length > 0
+                  ? `Call iana_get_registry_records again with subregistry set to one of: ${ids.map(inline).join(', ')}.`
+                  : `${inline(model.id)} has no sub-registries; call iana_get_registry_records again without subregistry.`,
             },
           },
         );
       }
     } else {
       const withRecords = tables.filter((candidate) => candidate.records.length > 0);
+      const withFiles = tables.filter(fileOnly);
       if (withRecords.length === 1) table = withRecords[0];
       else if (model.subregistries.length === 0) table = model.root;
+      else if (model.recordCount === 0 && withFiles.length === 1) table = withFiles[0];
+    }
+
+    if (table && fileOnly(table)) {
+      const urls = table.files.map((file) => file.url);
+      const files = urls.map(inline).join(', ');
+      throw ctx.fail(
+        'non_xml_registry',
+        `${inline(table.id)} is published ${publishedAs(table)} (${files}); its XML file holds no records.`,
+        {
+          registry: model.id,
+          ...(table === model.root ? {} : { subregistry: table.id }),
+          file: urls[0],
+          recovery: {
+            hint: `Read ${files} directly, or call iana_search_registries for a related XML registry.`,
+          },
+        },
+      );
     }
 
     const filters = [model.id, table?.id ?? '', squash(input.value ?? ''), input.contains ?? ''];
@@ -508,6 +521,7 @@ export const getRegistryRecords = tool('iana_get_registry_records', {
         ...(model.root.registrationRule
           ? { registration_procedure: model.root.registrationRule }
           : {}),
+        ...(model.root.description ? { description: model.root.description } : {}),
         notes: rootNotes.notes,
         ...(rootNotes.truncated ? { notes_truncated: true } : {}),
         columns: [],
@@ -563,10 +577,13 @@ export const getRegistryRecords = tool('iana_get_registry_records', {
       cap: input.limit,
       more,
       fragments: [
-        matches.length === 0 &&
-          (filterEcho
-            ? `No record in ${inline(table.id)} matched${filterEcho}. Drop a filter, or check the column names listed in columns.`
+        table.records.length === 0 &&
+          (model.recordCount === 0
+            ? `${inline(table.id)} publishes no records in its XML.`
             : `${inline(table.id)} holds no records.`),
+        table.records.length > 0 &&
+          matches.length === 0 &&
+          `No record in ${inline(table.id)} matched${filterEcho}. Drop a filter, or check the column names listed in columns.`,
         matches.length > 0 &&
           offset >= matches.length &&
           `The cursor's offset ${offset} is past the ${matches.length} matching records; call again without cursor to start over.`,
@@ -586,6 +603,7 @@ export const getRegistryRecords = tool('iana_get_registry_records', {
       ...header,
       ...(isRoot ? {} : { subregistry_id: table.id, subregistry_title: table.title }),
       ...(table.registrationRule ? { registration_procedure: table.registrationRule } : {}),
+      ...(table.description ? { description: table.description } : {}),
       ...(table.references.length > 0 ? { references: table.references } : {}),
       ...(table.ranges.length > 0 ? { registration_ranges: table.ranges } : {}),
       notes: notes.notes,
@@ -607,6 +625,9 @@ export const getRegistryRecords = tool('iana_get_registry_records', {
     }
     if (result.registration_procedure) {
       lines.push(`**Registration procedure:** ${inline(result.registration_procedure)}`);
+    }
+    if (result.description) {
+      lines.push('', '**Description:**', quote(result.description), '');
     }
     if (result.references?.length) {
       lines.push('**Registry references:**', ...referenceLines(result.references));

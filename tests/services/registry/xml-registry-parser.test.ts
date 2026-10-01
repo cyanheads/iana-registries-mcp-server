@@ -15,10 +15,12 @@ import {
   HTTP_STATUS_XML,
   LEGACY_STUB_XML,
   MALFORMED_XML,
+  MIB_MODULES_XML,
   NESTED_XML,
   PERSON_MARKERS,
   PORTS_XML,
   WRONG_ROOT_XML,
+  YANG_MODULE_XML,
 } from '../../fixtures/registry-xml.js';
 import { asMcpError } from '../../shared/upstream-harness.js';
 
@@ -54,11 +56,12 @@ describe('registry shell', () => {
     ]);
   });
 
-  it('omits category, updated and legacyFile when the file has none', () => {
+  it('omits category, updated and description when the file has none, with no files', () => {
     const model = parse(withRecord('<value>1</value>'));
     expect(model).not.toHaveProperty('category');
     expect(model).not.toHaveProperty('updated');
-    expect(model).not.toHaveProperty('legacyFile');
+    expect(model.root).not.toHaveProperty('description');
+    expect(model.root.files).toEqual([]);
     expect(model.title).toBe('t');
   });
 
@@ -508,6 +511,8 @@ describe('person data never reaches the model', () => {
     ['ports file (assignee, contact, controller xref, inline xref, people)', PORTS_XML],
     ['http status file (expert at two levels)', HTTP_STATUS_XML],
     ['nested file', NESTED_XML],
+    ['YANG module registry (description address, people)', YANG_MODULE_XML],
+    ['MIB module registry (sub-registry experts)', MIB_MODULES_XML],
   ])('%s', (_name, xml) => {
     const text = sweep(parse(xml));
     for (const marker of PERSON_MARKERS) expect(text).not.toContain(marker);
@@ -621,8 +626,36 @@ describe('unreadable files', () => {
   it.each([
     ['a DOCTYPE', DOCTYPE_XML, /DOCTYPE/],
     ['a document that is not a registry', WRONG_ROOT_XML, /no <registry> root/],
-    ['a registry with no records, sub-registries or legacy pointer', EMPTY_XML, /zero records/],
-    ['unbalanced markup that leaves no records', MALFORMED_XML, /zero records|well-formed/],
+    [
+      'a record-less registry with no title',
+      '<registry id="x"><updated>2026-01-01</updated></registry>',
+      /parsed to zero records and has no registry title\.$/,
+    ],
+    [
+      'a record-less registry whose <record> sits inside a <note>',
+      '<registry id="x"><title>t</title><note>see <record><value>1</value></record></note></registry>',
+      /parsed to zero records although it holds <record> elements\.$/,
+    ],
+    [
+      'a registry truncated after its title',
+      '<registry id="x"><title>t</title>',
+      /parsed to zero records and does not end with its <\/registry> closing tag\.$/,
+    ],
+    [
+      'unbalanced markup that leaves no records',
+      MALFORMED_XML,
+      /parsed to zero records and does not end with its <\/registry> closing tag\.$/,
+    ],
+    [
+      'an unclosed title that swallows the records before a closed root',
+      '<registry id="x"><title>t<record><value>1</value></record></registry>',
+      /parsed to zero records although it holds <record> elements\.$/,
+    ],
+    [
+      'a record-less registry with content after its closing tag',
+      '<registry id="x"><title>t</title></registry><registry id="y"/>',
+      /does not end with its <\/registry> closing tag/,
+    ],
     ['an empty body', '', /no <registry> root/],
     [
       'an HTML error page',
@@ -649,19 +682,16 @@ describe('unreadable files', () => {
     expect(error.message).not.toContain('expanded');
   });
 
-  it('accepts a legacy stub: no records, the file pointer on the model and the root table', () => {
+  it('accepts a legacy stub: no records, the file pointer on the root table', () => {
     const model = parse(LEGACY_STUB_XML);
     expect(model.recordCount).toBe(0);
-    expect(model.legacyFile).toBe('example-legacy.txt');
-    expect(model.root.legacyFile).toBe('example-legacy.txt');
+    expect(model.root.files).toEqual([
+      {
+        type: 'legacy',
+        url: 'https://www.iana.org/assignments/example-legacy/example-legacy.txt',
+      },
+    ]);
     expect(model.updated).toBe('2026-09-17');
-  });
-
-  it('ignores a non-legacy <file> on a table', () => {
-    const model = parse(
-      `<registry id="x"><title>t</title><file type="template">a/b</file><record><value>1</value></record></registry>`,
-    );
-    expect(model).not.toHaveProperty('legacyFile');
   });
 
   it('accepts a DOCTYPE-looking string inside text after the root begins', () => {
@@ -669,5 +699,126 @@ describe('unreadable files', () => {
       `<registry id="x"><title>t</title><record><value>1</value><description>mentions &lt;!DOCTYPE html&gt; literally</description></record></registry>`,
     );
     expect(model.root.records[0]?.fields.description).toBe('mentions <!DOCTYPE html> literally');
+  });
+});
+
+describe('record-less registries', () => {
+  it('accepts a titled, well-formed registry with no records, sub-registries, or files', () => {
+    const model = parse(EMPTY_XML);
+    expect(model).toMatchObject({ id: 'example-empty', title: 'Example Empty Registry' });
+    expect(model.recordCount).toBe(0);
+    expect(model.subregistries).toEqual([]);
+    expect(model.root.files).toEqual([]);
+  });
+
+  it('accepts whitespace inside and after the root closing tag', () => {
+    expect(parse('<registry id="x"><title>t</title></registry >\n\n').recordCount).toBe(0);
+  });
+
+  it('reads a YANG module registry: rule, description with its module link, references', () => {
+    const model = parse(YANG_MODULE_XML);
+    expect(model).toMatchObject({
+      id: 'example-yang-algs',
+      title: 'YANG Module Example Algorithms',
+      category: 'YANG Module Example',
+      updated: '2026-09-01',
+      recordCount: 0,
+    });
+    expect(model.root.registrationRule).toBe('Expert Review');
+    expect(model.root.description).toBe(
+      [
+        'This module mirrors the',
+        'Example Parameters (example-parameters) registry.',
+        'Module file: https://www.iana.org/assignments/yang-parameters/example-yang-algs@2026-09-01.yang',
+        'Questions go to [email removed].',
+      ].join('\n'),
+    );
+    expect(model.root.references).toEqual([
+      { type: 'rfc', id: 'RFC 9999', url: 'https://www.rfc-editor.org/rfc/rfc9999.html' },
+    ]);
+  });
+
+  it('keeps a YANG file name in a uri xref id and url', () => {
+    const data =
+      'https://www.iana.org/assignments/yang-parameters/example-yang-algs@2026-09-01.yang';
+    expect(parseReference({ type: 'uri', data }, '')).toEqual({ type: 'uri', id: data, url: data });
+  });
+
+  it('reads <file type="mib"> on each sub-registry as a link to the module at /assignments/<name>', () => {
+    const model = parse(MIB_MODULES_XML);
+    expect(model.recordCount).toBe(0);
+    expect(model.root.files).toEqual([]);
+    expect(model.subregistries.map((table) => [table.id, table.files])).toEqual([
+      [
+        'example-one-mib',
+        [{ type: 'mib', url: 'https://www.iana.org/assignments/example-one-mib' }],
+      ],
+      [
+        'example-two-mib',
+        [{ type: 'mib', url: 'https://www.iana.org/assignments/example-two-mib' }],
+      ],
+    ]);
+  });
+});
+
+describe('file pointers', () => {
+  const filesOf = (inner: string, sub = '') =>
+    parse(
+      `<registry id="root-id"><title>t</title>${inner}${sub ? `<registry id="s"><title>s</title>${sub}</registry>` : ''}</registry>`,
+    );
+
+  it.each([
+    [
+      'a relative legacy file, path segments encoded, under the root registry',
+      '<file type="legacy">sub dir/my file.txt</file>',
+      { type: 'legacy', url: 'https://www.iana.org/assignments/root-id/sub%20dir/my%20file.txt' },
+    ],
+    [
+      'an absolute http(s) URL, as given',
+      '<file type="legacy">https://www.iana.org/assignments/x/y.txt</file>',
+      { type: 'legacy', url: 'https://www.iana.org/assignments/x/y.txt' },
+    ],
+    [
+      'a protocol-relative URL, on https',
+      '<file>//www.iana.org/assignments/x/y.txt</file>',
+      { url: 'https://www.iana.org/assignments/x/y.txt' },
+    ],
+    [
+      'a file naming another registry, under that registry',
+      '<file type="template" registry="other reg">a/b c</file>',
+      { type: 'template', url: 'https://www.iana.org/assignments/other%20reg/a/b%20c' },
+    ],
+    [
+      'a mib module, at /assignments/<name>',
+      '<file type="mib">example-mib</file>',
+      { type: 'mib', url: 'https://www.iana.org/assignments/example-mib' },
+    ],
+  ])('resolves %s', (_name, file, expected) => {
+    expect(filesOf(file).root.files).toEqual([expected]);
+  });
+
+  it('resolves a sub-registry relative file under the root registry id', () => {
+    expect(filesOf('', '<file type="legacy">inner.txt</file>').subregistries[0]?.files).toEqual([
+      { type: 'legacy', url: 'https://www.iana.org/assignments/root-id/inner.txt' },
+    ]);
+  });
+
+  it('reads every <file> in a <files> wrapper, in order, and skips an empty one', () => {
+    expect(
+      filesOf(
+        '<files><file type="legacy">a.txt</file><file/><file type="legacy">b.txt</file></files>',
+      ).root.files,
+    ).toEqual([
+      { type: 'legacy', url: 'https://www.iana.org/assignments/root-id/a.txt' },
+      { type: 'legacy', url: 'https://www.iana.org/assignments/root-id/b.txt' },
+    ]);
+  });
+
+  it('keeps the files of a table that also holds records', () => {
+    const model = filesOf('<file type="text">notes.txt</file><record><value>1</value></record>');
+    expect(model.recordCount).toBe(1);
+    expect(model.root.files).toEqual([
+      { type: 'text', url: 'https://www.iana.org/assignments/root-id/notes.txt' },
+    ]);
   });
 });
