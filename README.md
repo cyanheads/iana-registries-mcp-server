@@ -193,8 +193,6 @@ MCP_TRANSPORT_TYPE=http MCP_HTTP_PORT=3010 bun run start:http
 # Server listens at http://localhost:3010/mcp
 ```
 
-One server process paces its requests to each upstream for all of its clients together, so a deployment serving several clients should rate-limit each client at its edge (a reverse proxy or gateway).
-
 ### Prerequisites
 
 - [Bun v1.4.0](https://bun.sh/) or higher (or Node.js v24+).

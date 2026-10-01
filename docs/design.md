@@ -587,7 +587,7 @@ A 10-draft batch would need 30 Datatracker calls (40 with revision retries, more
 - **PEN organization strings are verbatim**, including upstream mojibake in a small number of entries; nine organization lines that carry contact details are withheld.
 - **Generic field values over 2,000 characters are cut** (none probed exceeds 1,532); the record names the cut field in `cut_fields`.
 - **Email addresses inside registry text are replaced**, including the occasional IETF mailing-list address in a note; template statement lines that mention a contact are dropped.
-- **Upstream pacing is per process, shared by every client.** One server process paces each upstream for all of its clients together, and the per-call Datatracker limit bounds one call, not a client that makes many. A deployment serving several clients needs a per-client rate limit at its edge (a reverse proxy or gateway).
+- **Upstream pacing is per process, shared by every client.** One server process paces each upstream for all of its clients together, and the per-call Datatracker limit bounds one call, not a client that makes many.
 - **`iana_get_rfc_status` resolves at most six drafts per call.** A plain draft name costs three Datatracker requests and one with a revision suffix four, since Datatracker answers the suffixed name 404 before the plain name is read, so one call takes six plain drafts or five suffixed ones. The rest come back in `failed[]` with `request_limit`, unrequested, for another call (Design Decision 39). While Datatracker is failing, retries draw on the same 20 and can cut an admitted draft too.
 
 ## API Reference
