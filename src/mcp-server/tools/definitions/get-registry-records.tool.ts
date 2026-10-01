@@ -21,6 +21,7 @@ import { compileQuery, matchesQuery } from '@/services/registry/search-text.js';
 import type {
   Loaded,
   ProtocolIndex,
+  Reference,
   RegistrationRange,
   RegistryNote,
   RegistryRecord,
@@ -68,12 +69,20 @@ const NOTES_BUDGET = 4_000;
 const FIELD_MAX = 2_000;
 /** Most fields one record keeps. */
 const MAX_FIELDS = 16;
+/** Most names one record's `cut_fields` lists: every kept field cut at {@link FIELD_MAX}, and as many dropped ones. */
+const MAX_CUT_FIELDS = 2 * MAX_FIELDS;
 /** Most references a table or a record keeps (probed maximum: 9, on a record). */
 const MAX_REFERENCES = 25;
 /** Most registration ranges a table keeps (probed maximum: 8). */
 const MAX_RANGES = 25;
+/** Most columns a table lists (probed maximum: 10). */
+const MAX_COLUMNS = 50;
+/** Most notes the first page returns (probed maximum: 10). */
+const MAX_NOTES = 25;
 /** Most sub-registries a listing or an `unknown_subregistry` error names (probed maximum: 127). */
 const MAX_SUBREGISTRIES = 250;
+/** Most files a `non_xml_registry` error names (probed maximum: 1). */
+const MAX_FILES = 25;
 
 /** Splits the `registry` input into an id and an optional URL fragment. */
 function parseRegistryInput(registry: string): { fragment?: string; id: string } {
@@ -107,51 +116,87 @@ function capRanges(ranges: readonly RegistrationRange[]): RegistrationRange[] {
 const cutNotice = (total: number, max: number, noun: string) =>
   total > max && `Showing the first ${max} of ${total} ${noun}.`;
 
-function toRecordOutput(record: RegistryRecord) {
+/**
+ * A reference with each text capped. A URL longer than {@link FIELD_MAX} is
+ * dropped rather than cut, since a cut URL would lead somewhere else.
+ */
+function capReference({ type, id, url, section, label }: Reference): Reference {
+  return {
+    type,
+    id: capped(id),
+    ...(url && url.length <= FIELD_MAX ? { url } : {}),
+    ...(section ? { section: capped(section) } : {}),
+    ...(label ? { label: capped(label) } : {}),
+  };
+}
+
+/** The first {@link MAX_REFERENCES} references, each capped. */
+const capReferences = (references: readonly Reference[]) =>
+  references.slice(0, MAX_REFERENCES).map(capReference);
+
+/** A record as returned, and whether its `cut_fields` list passed {@link MAX_CUT_FIELDS}. */
+function toRecordOutput(entry: RegistryRecord) {
   const fields: Record<string, string> = {};
   const cutFields: string[] = [];
-  Object.entries(record.fields).forEach(([name, text], index) => {
+  Object.entries(entry.fields).forEach(([name, text], index) => {
     if (index >= MAX_FIELDS) {
       cutFields.push(name);
       return;
     }
     const cut = capText(text);
-    fields[name] = cut.text;
+    fields[capped(name)] = cut.text;
     if (cut.cut) cutFields.push(name);
   });
-  return {
-    ...(record.value !== undefined ? { value: capped(record.value) } : {}),
+  const record = {
+    ...(entry.value !== undefined ? { value: capped(entry.value) } : {}),
     fields,
-    references: record.references.slice(0, MAX_REFERENCES),
-    ...(record.registered ? { registered: record.registered } : {}),
-    ...(record.updated ? { updated: record.updated } : {}),
-    ...(cutFields.length > 0 ? { cut_fields: cutFields } : {}),
+    references: capReferences(entry.references),
+    ...(entry.registered ? { registered: capped(entry.registered) } : {}),
+    ...(entry.updated ? { updated: capped(entry.updated) } : {}),
+    ...(cutFields.length > 0 ? { cut_fields: cutFields.slice(0, MAX_CUT_FIELDS).map(capped) } : {}),
   };
+  return { record, cutFieldsOver: cutFields.length > MAX_CUT_FIELDS };
 }
 
-type RecordOutput = ReturnType<typeof toRecordOutput>;
+type RecordOutput = ReturnType<typeof toRecordOutput>['record'];
 
-/** Notes up to {@link NOTES_BUDGET} characters of text; the note that crosses it is cut. */
-function capNotes(notes: readonly RegistryNote[]): { notes: RegistryNote[]; truncated: boolean } {
+/** A note with its title and anchor capped. */
+const capNote = ({ text, anchor, title }: RegistryNote): RegistryNote => ({
+  text,
+  ...(anchor ? { anchor: capped(anchor) } : {}),
+  ...(title ? { title: capped(title) } : {}),
+});
+
+/**
+ * The first {@link MAX_NOTES} notes, up to {@link NOTES_BUDGET} characters of
+ * text; the note that crosses the budget is cut. `notice` discloses a count cut,
+ * and is `false` when the budget cut the notes first.
+ */
+function capNotes(notes: readonly RegistryNote[]): {
+  notes: RegistryNote[];
+  notice: string | false;
+  truncated: boolean;
+} {
   const kept: RegistryNote[] = [];
   let used = 0;
-  for (const note of notes) {
+  for (const note of notes.slice(0, MAX_NOTES)) {
     const room = NOTES_BUDGET - used;
     if (note.text.length > room) {
-      if (room > 1) kept.push({ ...note, text: `${note.text.slice(0, room - 1)}…` });
-      return { notes: kept, truncated: true };
+      if (room > 1) kept.push(capNote({ ...note, text: `${note.text.slice(0, room - 1)}…` }));
+      return { notes: kept, notice: false, truncated: true };
     }
-    kept.push(note);
+    kept.push(capNote(note));
     used += note.text.length;
   }
-  return { notes: kept, truncated: false };
+  return { notes: kept, notice: cutNotice(notes.length, MAX_NOTES, 'notes'), truncated: false };
 }
 
-/** The table's key column: `value`, else `number`, else the first column. */
+/** The table's key column as returned: `value`, else `number`, else the first column, capped. */
 function keyColumn(table: RegistryTable): string | undefined {
   if (table.columns.includes('value')) return 'value';
   if (table.columns.includes('number')) return 'number';
-  return table.columns[0];
+  const first = table.columns[0];
+  return first === undefined ? undefined : capped(first);
 }
 
 const squash = (text: string) => text.replace(/\s+/g, '').toLowerCase();
@@ -329,12 +374,16 @@ export const getRegistryRecords = tool('iana_get_registry_records', {
           })
           .describe('One registry note.'),
       )
-      .describe('Notes of the table read, first page only, 4,000 characters at most.'),
+      .describe(
+        'Notes of the table read, first page only: the first 25, 4,000 characters at most.',
+      ),
     notes_truncated: z
       .boolean()
       .optional()
       .describe('True when notes were cut at 4,000 characters.'),
-    columns: z.array(z.string()).describe('Field (XML element) names seen, first-seen order.'),
+    columns: z
+      .array(z.string())
+      .describe('Field (XML element) names seen, first-seen order, the first 50.'),
     value_field: z.string().optional().describe('The key column the value filter matches.'),
     records: z
       .array(
@@ -352,7 +401,9 @@ export const getRegistryRecords = tool('iana_get_registry_records', {
             cut_fields: z
               .array(z.string())
               .optional()
-              .describe('Fields cut at 2,000 characters (ending in …) or past the 16-field cap.'),
+              .describe(
+                'Fields cut at 2,000 characters (ending in …) or past the 16-field cap, the first 32.',
+              ),
           })
           .describe('One registry record.'),
       )
@@ -477,6 +528,7 @@ export const getRegistryRecords = tool('iana_get_registry_records', {
       });
     }
     const { model, source } = loaded;
+    const registryId = capped(model.id);
 
     const tables = tablesOf(model);
     const selectable = tables.filter((table) => table !== model.root || table.records.length > 0);
@@ -486,20 +538,20 @@ export const getRegistryRecords = tool('iana_get_registry_records', {
       const wanted = requestedSub.toLowerCase();
       table = tables.find((candidate) => candidate.id.toLowerCase() === wanted);
       if (!table) {
-        const ids = selectable.slice(0, MAX_SUBREGISTRIES).map((candidate) => candidate.id);
+        const ids = selectable.slice(0, MAX_SUBREGISTRIES).map((candidate) => capped(candidate.id));
         const unnamed = selectable.length - ids.length;
         throw ctx.fail(
           'unknown_subregistry',
-          `"${requestedSub}" is not a sub-registry of ${inline(model.id)}.`,
+          `"${requestedSub}" is not a sub-registry of ${inline(registryId)}.`,
           {
-            registry: model.id,
+            registry: registryId,
             subregistry: requestedSub,
             subregistries: ids,
             recovery: {
               hint:
                 ids.length > 0
                   ? `Call iana_get_registry_records again with subregistry set to one of: ${ids.map(inline).join(', ')}${unnamed > 0 ? `; ${unnamed} more are not named here` : ''}.`
-                  : `${inline(model.id)} has no sub-registries; call iana_get_registry_records again without subregistry.`,
+                  : `${inline(registryId)} has no sub-registries; call iana_get_registry_records again without subregistry.`,
             },
           },
         );
@@ -513,14 +565,16 @@ export const getRegistryRecords = tool('iana_get_registry_records', {
     }
 
     if (table && fileOnly(table)) {
-      const urls = table.files.map((file) => file.url);
+      const tableId = capped(table.id);
+      const urls = table.files.slice(0, MAX_FILES).map((file) => capped(file.url));
+      const unnamed = table.files.length - urls.length;
       const files = urls.map(inline).join(', ');
       throw ctx.fail(
         'non_xml_registry',
-        `${inline(table.id)} is published ${publishedAs(table)} (${files}); its XML file holds no records.`,
+        `${inline(tableId)} is published ${publishedAs(table)} (${files}${unnamed > 0 ? `; ${unnamed} more are not named here` : ''}); its XML file holds no records.`,
         {
-          registry: model.id,
-          ...(table === model.root ? {} : { subregistry: table.id }),
+          registry: registryId,
+          ...(table === model.root ? {} : { subregistry: tableId }),
           file: urls[0],
           recovery: {
             hint: `Read ${files} directly, or call iana_search_registries for a related XML registry.`,
@@ -535,14 +589,14 @@ export const getRegistryRecords = tool('iana_get_registry_records', {
       throw ctx.fail(
         'cursor_mismatch',
         'This cursor was minted for a different registry, subregistry, value, or contains.',
-        { registry: model.id },
+        { registry: registryId },
       );
     }
     const offset = cursor?.offset ?? 0;
     const firstPage = offset === 0;
     const header = {
-      registry_id: model.id,
-      registry_title: model.title,
+      registry_id: registryId,
+      registry_title: capped(model.title),
     };
 
     if (!table) {
@@ -555,6 +609,7 @@ export const getRegistryRecords = tool('iana_get_registry_records', {
         fragments: [
           `This registry has ${selectable.length} sub-registries; call again with subregistry set to one of the listed ids.`,
           cutNotice(selectable.length, MAX_SUBREGISTRIES, 'sub-registries'),
+          rootNotes.notice,
         ],
       });
       return {
@@ -568,8 +623,8 @@ export const getRegistryRecords = tool('iana_get_registry_records', {
         columns: [],
         records: [],
         subregistries: selectable.slice(0, MAX_SUBREGISTRIES).map((candidate) => ({
-          id: candidate.id,
-          title: candidate.title,
+          id: capped(candidate.id),
+          title: capped(candidate.title),
           record_count: candidate.records.length,
         })),
         source,
@@ -588,9 +643,10 @@ export const getRegistryRecords = tool('iana_get_registry_records', {
     let used = 2;
     let budgetCut = false;
     let referencesCut = 0;
+    let cutFieldsCut = 0;
     for (const match of matches.slice(offset)) {
       if (records.length >= input.limit) break;
-      const record = toRecordOutput(match);
+      const { record, cutFieldsOver } = toRecordOutput(match);
       const size = JSON.stringify(record).length + (records.length > 0 ? 1 : 0);
       if (records.length > 0 && used + size > RECORDS_BUDGET) {
         budgetCut = true;
@@ -599,6 +655,7 @@ export const getRegistryRecords = tool('iana_get_registry_records', {
       records.push(record);
       used += size;
       if (match.references.length > MAX_REFERENCES) referencesCut++;
+      if (cutFieldsOver) cutFieldsCut++;
     }
     const nextOffset = offset + records.length;
     const more = nextOffset < matches.length;
@@ -624,6 +681,8 @@ export const getRegistryRecords = tool('iana_get_registry_records', {
         : `Drop ${input.contains === undefined ? 'value' : 'a filter'}, or check the column names listed in columns.`;
     const mintedFor =
       typeof cursor?.u === 'string' && CURSOR_DATE.test(cursor.u) ? cursor.u : undefined;
+    const tableId = capped(table.id);
+    const notes = capNotes(firstPage ? table.notes : []);
     discloseList(ctx.enrich, {
       total: matches.length,
       shown: records.length,
@@ -632,11 +691,11 @@ export const getRegistryRecords = tool('iana_get_registry_records', {
       fragments: [
         table.records.length === 0 &&
           (model.recordCount === 0
-            ? `${inline(table.id)} publishes no records in its XML.`
-            : `${inline(table.id)} holds no records.`),
+            ? `${inline(tableId)} publishes no records in its XML.`
+            : `${inline(tableId)} holds no records.`),
         table.records.length > 0 &&
           matches.length === 0 &&
-          `No record in ${inline(table.id)} ${missed}. ${missHint}`,
+          `No record in ${inline(tableId)} ${missed}. ${missHint}`,
         matches.length > 0 &&
           offset >= matches.length &&
           `The cursor's offset ${offset} is past the ${matches.length} matching records; call again without cursor to start over.`,
@@ -645,10 +704,16 @@ export const getRegistryRecords = tool('iana_get_registry_records', {
           `The registry was updated since this cursor was minted (${inline(mintedFor)} → ${inline(source.registry_updated ?? 'no date')}); record offsets may have shifted.`,
         cutNotice(table.references.length, MAX_REFERENCES, 'table references'),
         cutNotice(table.ranges.length, MAX_RANGES, 'registration ranges'),
+        notes.notice,
+        cutNotice(table.columns.length, MAX_COLUMNS, 'columns'),
         referencesCut > 0 &&
           (referencesCut === 1
             ? `One record on this page lists more than ${MAX_REFERENCES} references; only the first ${MAX_REFERENCES} are shown.`
             : `${referencesCut} records on this page list more than ${MAX_REFERENCES} references; only the first ${MAX_REFERENCES} of each are shown.`),
+        cutFieldsCut > 0 &&
+          (cutFieldsCut === 1
+            ? `One record on this page has more than ${MAX_CUT_FIELDS} cut fields; its cut_fields names only the first ${MAX_CUT_FIELDS}.`
+            : `${cutFieldsCut} records on this page have more than ${MAX_CUT_FIELDS} cut fields; cut_fields names only the first ${MAX_CUT_FIELDS} of each.`),
         more &&
           (budgetCut
             ? `This page stopped at the ${RECORDS_BUDGET.toLocaleString('en-US')}-character output budget after ${records.length} records; ${remaining} more match. Pass next_cursor as cursor to continue.`
@@ -656,20 +721,17 @@ export const getRegistryRecords = tool('iana_get_registry_records', {
       ],
     });
 
-    const notes = capNotes(firstPage ? table.notes : []);
     const isRoot = table === model.root;
     return {
       ...header,
-      ...(isRoot ? {} : { subregistry_id: table.id, subregistry_title: table.title }),
+      ...(isRoot ? {} : { subregistry_id: tableId, subregistry_title: capped(table.title) }),
       ...(table.registrationRule ? { registration_procedure: capped(table.registrationRule) } : {}),
       ...(table.description ? { description: capped(table.description) } : {}),
-      ...(table.references.length > 0
-        ? { references: table.references.slice(0, MAX_REFERENCES) }
-        : {}),
+      ...(table.references.length > 0 ? { references: capReferences(table.references) } : {}),
       ...(table.ranges.length > 0 ? { registration_ranges: capRanges(table.ranges) } : {}),
       notes: notes.notes,
       ...(notes.truncated ? { notes_truncated: true } : {}),
-      columns: table.columns,
+      columns: table.columns.slice(0, MAX_COLUMNS).map(capped),
       ...(valueField ? { value_field: valueField } : {}),
       records,
       ...(nextCursor ? { next_cursor: nextCursor } : {}),

@@ -1308,6 +1308,245 @@ describe('iana_get_registry_records: output budget and caps', () => {
     expect(hint).not.toContain('s250');
     expect(hint.endsWith('; 50 more are not named here.')).toBe(true);
   });
+
+  /** `c` repeated `length` times as the tool returns it: whole up to 2,000 characters, else 1,999 of them and `…`. */
+  const shown = (c: string, length: number) =>
+    length > 2_000 ? `${c.repeat(1_999)}…` : c.repeat(length);
+  /** The longest run of one repeated character in `text`. */
+  const longestRun = (text: string) =>
+    Math.max(...(text.match(/(.)\1*/gsu) ?? ['']).map((run) => run.length));
+
+  it.each([2_000, 2_001])(
+    'returns each upstream text of a table and its records whole at %i characters up to 2,000, cut past it',
+    async (length) => {
+      const text = (c: string) => c.repeat(length);
+      const cut = (c: string) => shown(c, length);
+      const ref = (id: string, section: string, label: string) =>
+        `<xref type="note" data="${text(id)}" section="${text(section)}">${text(label)}</xref>`;
+      const name = text('n');
+      const record = `<record date="${text('r')}" updated="${text('w')}"><${name}>${'v'.repeat(2_001)}</${name}><description>d</description>${ref('e', '6', 'f')}</record>`;
+      const note = `<note anchor="${text('x')}" title="${text('y')}">Note text.</note>`;
+      boot(
+        'long-texts',
+        registryXml({
+          id: text('i'),
+          title: text('T'),
+          body: subregistryXml(text('s'), `${ref('a', '5', 'b')}${note}${record}`, text('u')),
+        }),
+      );
+      const out = await call({ registry: 'long-texts' });
+      expect(out.structured).toMatchObject({
+        registry_id: cut('i'),
+        registry_title: cut('T'),
+        subregistry_id: cut('s'),
+        subregistry_title: cut('u'),
+        references: [{ type: 'note', id: cut('a'), section: cut('5'), label: cut('b') }],
+        notes: [{ anchor: cut('x'), title: cut('y'), text: 'Note text.' }],
+        columns: [cut('n'), 'description'],
+        value_field: cut('n'),
+      });
+      const value = `${'v'.repeat(1_999)}…`;
+      expect(records(out)).toEqual([
+        {
+          value,
+          fields: { [cut('n')]: value, description: 'd' },
+          references: [{ type: 'note', id: cut('e'), section: cut('6'), label: cut('f') }],
+          registered: cut('r'),
+          updated: cut('w'),
+          cut_fields: [cut('n')],
+        },
+      ]);
+      expect(out.structured).not.toHaveProperty('notice');
+      const longest = length > 2_000 ? 1_999 : length;
+      expect(longestRun(out.text)).toBe(longest);
+      expect(longestRun(JSON.stringify(out.structured))).toBe(longest);
+
+      const miss = await call({ registry: 'long-texts', value: 'none' });
+      expect(miss.structured.notice).toBe(
+        `No record in ${cut('s')} has ${cut('n')} "none". Drop value, or check the column names listed in columns.`,
+      );
+    },
+  );
+
+  it.each([2_000, 2_001])(
+    'names %i-character sub-registry ids and titles whole up to 2,000 characters, cut past it, in a listing and in unknown_subregistry',
+    async (length) => {
+      const text = (c: string) => c.repeat(length);
+      const cut = (c: string) => shown(c, length);
+      const longest = length > 2_000 ? 1_999 : length;
+      const subs = [
+        subregistryXml(text('p'), recordXml({ value: '1' }), text('g')),
+        subregistryXml(text('q'), recordXml({ value: '1' }), text('h')),
+      ].join('');
+      boot('long-ids', registryXml({ id: text('i'), title: 'Listing', body: subs }));
+
+      const listing = await call({ registry: 'long-ids' });
+      expect(listing.structured.subregistries).toEqual([
+        { id: cut('p'), title: cut('g'), record_count: 1 },
+        { id: cut('q'), title: cut('h'), record_count: 1 },
+      ]);
+      expect(longestRun(listing.text)).toBe(longest);
+      expect(longestRun(JSON.stringify(listing.structured))).toBe(longest);
+
+      const unknown = await call({ registry: 'long-ids', subregistry: 'nope' });
+      const error = errorOf(unknown);
+      expect(error.data).toMatchObject({ registry: cut('i'), subregistries: [cut('p'), cut('q')] });
+      expect(error.message).toContain(`is not a sub-registry of ${cut('i')}.`);
+      expect((error.data.recovery as { hint: string }).hint).toBe(
+        `Call iana_get_registry_records again with subregistry set to one of: ${cut('p')}, ${cut('q')}.`,
+      );
+      expect(longestRun(JSON.stringify(error))).toBe(longest);
+      expect(longestRun(unknown.text)).toBe(longest);
+    },
+  );
+
+  it.each([
+    [2_000, true],
+    [2_001, false],
+  ])('keeps a %i-character reference URL: %s', async (length, kept) => {
+    const uri = `https://example.org/${'a'.repeat(length - 20)}`;
+    const xref = `<xref type="uri" data="${uri}"/>`;
+    boot(
+      'long-url',
+      registryXml({ id: 'long-url', body: `${xref}${recordXml({ value: '1' }, xref)}` }),
+    );
+    const out = await call({ registry: 'long-url' });
+    const expected = kept
+      ? { type: 'uri', id: uri, url: uri }
+      : { type: 'uri', id: `${uri.slice(0, 1_999)}…` };
+    expect(out.structured.references).toEqual([expected]);
+    expect(records(out)[0]?.references).toEqual([expected]);
+  });
+
+  it.each([
+    [50, undefined],
+    [51, 'Showing the first 50 of 51 columns.'],
+  ])('lists the first 50 of %i columns', async (count, notice) => {
+    const body = Array.from({ length: count }, (_, index) =>
+      recordXml({ [`c${String(index).padStart(2, '0')}`]: 'x' }),
+    ).join('');
+    boot('many-columns', registryXml({ id: 'many-columns', body }));
+    const out = await call({ registry: 'many-columns', limit: 100 });
+    const columns = out.structured.columns as string[];
+    expect(columns).toHaveLength(50);
+    expect(columns.at(-1)).toBe('c49');
+    expect(records(out)).toHaveLength(count);
+    expect(out.structured.notice).toBe(notice);
+  });
+
+  it.each([
+    [48, undefined],
+    [
+      49,
+      'One record on this page has more than 32 cut fields; its cut_fields names only the first 32.',
+    ],
+  ])('names the first 32 cut fields of a %i-field record', async (fieldCount, notice) => {
+    boot('cut-names', registryXml({ id: 'cut-names', body: wideRecordXml(fieldCount) }));
+    const out = await call({ registry: 'cut-names' });
+    const [row] = records(out);
+    expect(row?.cut_fields).toHaveLength(32);
+    expect(row?.cut_fields?.at(-1)).toBe('f48');
+    expect(out.structured.notice).toBe(notice);
+  });
+
+  it('counts the records on a page whose cut fields pass 32', async () => {
+    const body = `${wideRecordXml(49)}${wideRecordXml(48)}${wideRecordXml(49)}`;
+    boot('cut-names-page', registryXml({ id: 'cut-names-page', body }));
+    const out = await call({ registry: 'cut-names-page' });
+    expect(records(out).map((row) => row.cut_fields?.length)).toEqual([32, 32, 32]);
+    expect(out.structured.notice).toBe(
+      '2 records on this page have more than 32 cut fields; cut_fields names only the first 32 of each.',
+    );
+  });
+
+  it.each([
+    [25, undefined],
+    [26, 'Showing the first 25 of 26 notes.'],
+  ])('returns the first 25 of %i notes, on a table read and a listing', async (count, notice) => {
+    const notes = Array.from(
+      { length: count },
+      (_, index) => `<note anchor="n${index}">Note ${index}.</note>`,
+    ).join('');
+    boot(
+      'many-notes',
+      registryXml({ id: 'many-notes', body: `${notes}${recordXml({ value: '1' })}` }),
+    );
+    const out = await call({ registry: 'many-notes' });
+    const kept = out.structured.notes as { anchor: string }[];
+    expect(kept).toHaveLength(25);
+    expect(kept.at(-1)?.anchor).toBe('n24');
+    expect(out.structured).not.toHaveProperty('notes_truncated');
+    expect(out.structured.notice).toBe(notice);
+
+    const subs = ['a', 'b'].map((id) => subregistryXml(id, recordXml({ value: '1' }))).join('');
+    boot('many-root-notes', registryXml({ id: 'many-root-notes', body: `${notes}${subs}` }));
+    const listing = await call({ registry: 'many-root-notes' });
+    expect(listing.structured.notes).toHaveLength(25);
+    expect(listing.structured.notice).toBe(
+      [
+        'This registry has 2 sub-registries; call again with subregistry set to one of the listed ids.',
+        notice,
+      ]
+        .filter(Boolean)
+        .join(' '),
+    );
+  });
+
+  it('leaves the note count out of the notice when the text budget cut the notes first', async () => {
+    const notes = Array.from(
+      { length: 30 },
+      (_, index) => `<note anchor="n${index}">${'t'.repeat(200)}</note>`,
+    ).join('');
+    boot(
+      'budget-notes',
+      registryXml({ id: 'budget-notes', body: `${notes}${recordXml({ value: '1' })}` }),
+    );
+    const out = await call({ registry: 'budget-notes' });
+    expect(out.structured.notes).toHaveLength(20);
+    expect(out.structured.notes_truncated).toBe(true);
+    expect(out.structured).not.toHaveProperty('notice');
+  });
+
+  it.each([
+    [25, ''],
+    [26, '; 1 more are not named here'],
+  ])('names the first 25 of %i files in non_xml_registry', async (count, more) => {
+    const files = Array.from(
+      { length: count },
+      (_, index) => `<file type="legacy">f${index}.txt</file>`,
+    ).join('');
+    boot('many-files', registryXml({ id: 'many-files', body: files }));
+    const error = errorOf(await call({ registry: 'many-files' }));
+    const fileUrl = (index: number) => `https://www.iana.org/assignments/many-files/f${index}.txt`;
+    const named = Array.from({ length: 25 }, (_, index) => fileUrl(index)).join(', ');
+    expect(error.data).toMatchObject({ reason: 'non_xml_registry', file: fileUrl(0) });
+    expect(error.message).toContain(`(${named}${more}); its XML file holds no records.`);
+    expect((error.data.recovery as { hint: string }).hint).toBe(
+      `Read ${named} directly, or call iana_search_registries for a related XML registry.`,
+    );
+  });
+
+  it.each([2_000, 2_001])(
+    'names a %i-character table id and file URL in non_xml_registry whole up to 2,000 characters, cut past it',
+    async (length) => {
+      const fileUrl = `https://example.org/${'z'.repeat(length - 20)}`;
+      boot(
+        'long-file',
+        registryXml({ id: 'i'.repeat(length), body: `<file type="legacy">${fileUrl}</file>` }),
+      );
+      const error = errorOf(await call({ registry: 'long-file' }));
+      const named = length > 2_000 ? `${fileUrl.slice(0, 1_999)}…` : fileUrl;
+      expect(error.data).toMatchObject({
+        reason: 'non_xml_registry',
+        registry: shown('i', length),
+        file: named,
+      });
+      expect(error.message).toContain(
+        `${shown('i', length)} is published only as plain text (${named}); its XML file holds no records.`,
+      );
+      expect(longestRun(JSON.stringify(error))).toBe(length > 2_000 ? 1_999 : length);
+    },
+  );
 });
 
 describe('iana_get_registry_records: reading through the index (404 retry)', () => {
