@@ -374,6 +374,37 @@ describe('iana_lookup_media_type: status annotations and replacements', () => {
     expect(row).toMatchObject({ status: 'obsoleted' });
     expect(row).not.toHaveProperty('replaced_by');
   });
+
+  it('keeps the dots inside a replacement and drops a run of trailing ones', async () => {
+    boot(
+      mediaXml({
+        application: mediaRecord({
+          name: 'old (OBSOLETED in favor of vnd.example.new...)',
+          file: 'application/old',
+        }),
+      }),
+    );
+    const [row] = rows(await call({ keyword: 'old' }));
+    expect(row?.replaced_by).toBe('application/vnd.example.new');
+  });
+
+  it('reads an annotation with 100,000 dots after "in favor of" in under 250 ms', async () => {
+    vi.useFakeTimers({ toNotFake: ['performance'] });
+    boot(
+      mediaXml({
+        application: mediaRecord({
+          name: `old (OBSOLETED in favor of a${'.'.repeat(100_000)}!)`,
+          file: 'application/old',
+        }),
+      }),
+    );
+    await call({ keyword: 'nothing matches this' });
+    const started = performance.now();
+    const [row] = rows(await call({ keyword: 'old' }));
+    expect(performance.now() - started).toBeLessThan(250);
+    expect(row).toMatchObject({ status: 'obsoleted' });
+    expect(row).not.toHaveProperty('replaced_by');
+  });
 });
 
 describe('iana_lookup_media_type: registration template', () => {

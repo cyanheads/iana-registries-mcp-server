@@ -64,6 +64,48 @@ describe('scrubEmails', () => {
   });
 });
 
+describe('scrubEmails address bounds', () => {
+  it('still removes an address whose local part runs past 64 characters', () => {
+    const out = scrubEmails(`${'x'.repeat(100)}@example.org`);
+    expect(out).not.toContain('@');
+    expect(out.endsWith(EMAIL_PLACEHOLDER)).toBe(true);
+  });
+
+  it('removes an address with a seven-label domain', () => {
+    expect(scrubEmails('person@a.b.c.d.e.f.example.org')).toBe(EMAIL_PLACEHOLDER);
+  });
+});
+
+describe('linear-time scanning', () => {
+  const N = 100_000;
+
+  /** Runs `fn` and returns its result with the milliseconds it took. */
+  function timed<T>(fn: () => T): [T, number] {
+    const started = performance.now();
+    const result = fn();
+    return [result, performance.now() - started];
+  }
+
+  it.each([
+    ['a run of local-part characters before a lone "@"', `${'a'.repeat(N)} @`],
+    ['an address whose domain is a run of one-letter labels', `a@${'a.'.repeat(N / 2)}1`],
+  ])('scrubEmails reads %s (100,000 characters) in under 250 ms', (_label, text) => {
+    const [out, ms] = timed(() => scrubEmails(text));
+    expect(out).toBe(text);
+    expect(ms).toBeLessThan(250);
+  });
+
+  it.each([
+    ['a run of local-part characters before a lone "&"', `${'a'.repeat(N)}&`],
+    ['a run of local-part characters before a lone "@"', `${'a'.repeat(N)} @`],
+    ['an "&" address whose domain is a run of one-letter labels', `a&${'a.'.repeat(N / 2)}1`],
+  ])('hasEmailToken reads %s (100,000 characters) in under 250 ms', (_label, text) => {
+    const [found, ms] = timed(() => hasEmailToken(text));
+    expect(found).toBe(false);
+    expect(ms).toBeLessThan(250);
+  });
+});
+
 describe('hasEmailToken', () => {
   it.each([
     ['Example Org, Example Person person@example.org', true],

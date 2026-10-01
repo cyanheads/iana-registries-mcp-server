@@ -6,7 +6,8 @@
  * (`a[data-doc-name]`), and `span.iana-protocol-comment` procedure text whose
  * nested `span.reg-expert` elements (designated-expert names) are removed before
  * any text is read. A parse under the floor is a layout change, never a short
- * index.
+ * index. Elements are found with `indexOf`, so a parse is linear in the page: a
+ * regex over it would retry every unclosed tag against the rest of the page.
  * @module services/registry/protocol-index-parser
  */
 
@@ -23,12 +24,19 @@ export const INDEX_MIN_ENTRIES = 2_000;
 const IANA = 'https://www.iana.org';
 const ID_PATTERN = /^[A-Za-z0-9_.-]{1,100}$/;
 
-const ROW = /<tr\b([^>]*)>([\s\S]*?)<\/tr>/g;
-const TITLE_LINK = /<div class="reg-title">\s*<a\b([^>]*)>([\s\S]*?)<\/a>/;
-const DOC_LINK = /<a\b([^>]*\bdata-doc-name\s*=[^>]*)>/g;
-const EXPERT_SPAN = /<span\b[^>]*\bclass="reg-expert"[^>]*>[\s\S]*?<\/span>/g;
-const COMMENT_SPAN = /<span class="iana-protocol-comment">([\s\S]*?)<\/span>/g;
-const ATTRIBUTE = /([A-Za-z_:][-A-Za-z0-9_:.]*)\s*=\s*(?:"([^"]*)"|'([^']*)')/g;
+const TITLE_CELL = '<div class="reg-title">';
+/** Sticky: whitespace, then an `<a` start tag, read where a title cell ends. */
+const TITLE_LINK_OPEN = /\s*<a(?!\w)/y;
+const COMMENT_OPEN = '<span class="iana-protocol-comment">';
+const EXPERT_CLASS = /\bclass="reg-expert"/;
+const DOC_NAME = /\bdata-doc-name\s*=/;
+const WORD_CHAR = /\w/;
+const TAG = /<[^>]*>/g;
+const LINE_BREAK = /<br\s*\/?>/i;
+/** The lookbehind tries a name only where it starts, never again inside it. */
+const ATTRIBUTE = /(?<![-A-Za-z0-9_:.])([A-Za-z_:][-A-Za-z0-9_:.]*)\s*=\s*(?:"([^"]*)"|'([^']*)')/g;
+/** Trailing separators; the lookbehind tries the match only where a run starts. */
+const TRAILING_SEPARATORS = /(?<![\s;])[\s;]+$/;
 
 /** A `Map`, so an entity named after an object member (`&constructor;`) stays as written. */
 const NAMED_ENTITIES: ReadonlyMap<string, string> = new Map([
@@ -56,11 +64,94 @@ function decodeEntities(text: string): string {
   });
 }
 
-/** Tag-stripped, entity-decoded, whitespace-collapsed text. */
+/**
+ * Tag-stripped, entity-decoded, whitespace-collapsed text. Tags are stripped only
+ * up to the last `>`: a `<` after it opens no tag, and the tag pattern would scan
+ * the rest of the text again for each one.
+ */
 function textOf(html: string): string {
-  return decodeEntities(html.replace(/<[^>]*>/g, ' '))
+  const end = html.lastIndexOf('>') + 1;
+  return decodeEntities(`${html.slice(0, end).replace(TAG, ' ')}${html.slice(end)}`)
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+interface StartTag {
+  /** The text between the tag name and the `>` that closes the tag. */
+  attributes: string;
+  /** Index just past that `>`. */
+  end: number;
+  /** Index of the tag's `<`. */
+  start: number;
+}
+
+/**
+ * `<name …>` start tags in document order. A `<name` inside an earlier tag's
+ * attribute text is not a tag of its own, and a tag with no `>` after it ends the
+ * scan, since no later tag can close either.
+ */
+function* startTags(html: string, name: string): Generator<StartTag> {
+  const open = `<${name}`;
+  let at = html.indexOf(open);
+  while (at !== -1) {
+    const afterName = at + open.length;
+    if (WORD_CHAR.test(html.charAt(afterName))) {
+      at = html.indexOf(open, afterName);
+      continue;
+    }
+    const close = html.indexOf('>', afterName);
+    if (close === -1) return;
+    yield { attributes: html.slice(afterName, close), end: close + 1, start: at };
+    at = html.indexOf(open, close + 1);
+  }
+}
+
+/**
+ * Each `<tr …>` row's attribute text and its content up to the next `</tr>`. A
+ * row with no `</tr>` after it ends the scan.
+ */
+function* rows(html: string): Generator<[attributes: string, content: string]> {
+  let next = 0;
+  for (const tag of startTags(html, 'tr')) {
+    if (tag.start < next) continue;
+    const close = html.indexOf('</tr>', tag.end);
+    if (close === -1) return;
+    yield [tag.attributes, html.slice(tag.end, close)];
+    next = close + '</tr>'.length;
+  }
+}
+
+/** The link opening the first `div.reg-title` that starts with one: its attribute text and content. */
+function titleLink(row: string): { attributes: string; content: string } | undefined {
+  let at = row.indexOf(TITLE_CELL);
+  while (at !== -1) {
+    TITLE_LINK_OPEN.lastIndex = at + TITLE_CELL.length;
+    if (TITLE_LINK_OPEN.test(row)) {
+      const afterName = TITLE_LINK_OPEN.lastIndex;
+      const close = row.indexOf('>', afterName);
+      if (close === -1) return;
+      const end = row.indexOf('</a>', close + 1);
+      if (end === -1) return;
+      return { attributes: row.slice(afterName, close), content: row.slice(close + 1, end) };
+    }
+    at = row.indexOf(TITLE_CELL, at + TITLE_CELL.length);
+  }
+  return;
+}
+
+/** `html` without its `span.reg-expert` elements, each cut through the next `</span>`. */
+function withoutExperts(html: string): string {
+  const kept: string[] = [];
+  let next = 0;
+  for (const tag of startTags(html, 'span')) {
+    if (tag.start < next || !EXPERT_CLASS.test(tag.attributes)) continue;
+    const close = html.indexOf('</span>', tag.end);
+    if (close === -1) break;
+    kept.push(html.slice(next, tag.start));
+    next = close + '</span>'.length;
+  }
+  kept.push(html.slice(next));
+  return kept.join('');
 }
 
 function attributesOf(tag: string): Map<string, string> {
@@ -75,8 +166,9 @@ function attributesOf(tag: string): Map<string, string> {
 
 function definingDocuments(html: string): DefiningDocument[] {
   const documents: DefiningDocument[] = [];
-  for (const match of html.matchAll(DOC_LINK)) {
-    const attributes = attributesOf(match[1] ?? '');
+  for (const tag of startTags(html, 'a')) {
+    if (!DOC_NAME.test(tag.attributes)) continue;
+    const attributes = attributesOf(tag.attributes);
     const id = attributes.get('data-doc-name')?.trim();
     if (!id) continue;
     const title = attributes.get('title')?.trim();
@@ -95,23 +187,28 @@ function definingDocuments(html: string): DefiningDocument[] {
  * expert span survived removal (unexpected nesting), so no fragment of a
  * designated expert's name can leak through.
  */
-function registrationProcedure(html: string): string | undefined {
-  const withoutExperts = html.replace(EXPERT_SPAN, '');
-  if (withoutExperts.includes('reg-expert')) return;
+function registrationProcedure(docHtml: string): string | undefined {
+  const html = withoutExperts(docHtml);
+  if (html.includes('reg-expert')) return;
   const parts: string[] = [];
-  for (const match of withoutExperts.matchAll(COMMENT_SPAN)) {
-    for (const piece of (match[1] ?? '').split(/<br\s*\/?>/i)) {
-      const text = textOf(piece).replace(/[\s;]+$/, '');
+  let at = html.indexOf(COMMENT_OPEN);
+  while (at !== -1) {
+    const start = at + COMMENT_OPEN.length;
+    const end = html.indexOf('</span>', start);
+    if (end === -1) break;
+    for (const piece of html.slice(start, end).split(LINE_BREAK)) {
+      const text = textOf(piece).replace(TRAILING_SEPARATORS, '');
       if (text) parts.push(text);
     }
+    at = html.indexOf(COMMENT_OPEN, end + '</span>'.length);
   }
   return parts.length > 0 ? scrubEmails(parts.join('; ')) : undefined;
 }
 
 function parseEntry(row: string, category: string): IndexEntry | undefined {
-  const title = TITLE_LINK.exec(row);
+  const title = titleLink(row);
   if (!title) return;
-  const href = attributesOf(title[1] ?? '').get('href') ?? '';
+  const href = attributesOf(title.attributes).get('href') ?? '';
   if (!href.startsWith('/assignments/')) return;
   const [path = '', fragment] = href.slice('/assignments/'.length).split('#');
   const registryId = path.split('/')[0] ?? '';
@@ -120,7 +217,7 @@ function parseEntry(row: string, category: string): IndexEntry | undefined {
 
   const docStart = row.indexOf('class="reg-doc"');
   const docHtml = docStart === -1 ? '' : row.slice(docStart);
-  const entryTitle = scrubEmails(textOf(title[2] ?? ''));
+  const entryTitle = scrubEmails(textOf(title.content));
   const procedure = registrationProcedure(docHtml);
   return {
     registryId,
@@ -140,7 +237,7 @@ export function parseProtocolIndex(html: string): ProtocolIndex {
   const entries: IndexEntry[] = [];
   let category = '';
   let categoryCount = 0;
-  for (const [, attributes = '', row = ''] of html.matchAll(ROW)) {
+  for (const [attributes, row] of rows(html)) {
     if (/\bclass="[^"]*\bdtable__group\b/.test(attributes)) {
       category = scrubEmails(textOf(row));
       categoryCount++;

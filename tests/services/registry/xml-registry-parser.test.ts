@@ -682,6 +682,23 @@ describe('unreadable files', () => {
     expect(error.message).not.toContain('expanded');
   });
 
+  it.each([
+    [
+      'after a comment that mentions <registry',
+      '<?xml version="1.0"?>\n<!-- <registry --><!DOCTYPE registry [<!ENTITY example "expanded">]>\n<registry id="x"><title>&example;</title><record><value>1</value></record></registry>',
+    ],
+    [
+      'inside the root, in lowercase',
+      '<registry id="x"><title>t</title><!doctype registry [<!ENTITY example "expanded">]><record><value>&example;</value></record></registry>',
+    ],
+  ])('rejects a DOCTYPE placed %s, before any entity expands', (_name, xml) => {
+    const error = failure(xml);
+    expect(error.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+    expect(error.data).toMatchObject({ reason: 'upstream_unreadable', url: URL_ });
+    expect(error.message).toMatch(/DOCTYPE/);
+    expect(error.message).not.toContain('expanded');
+  });
+
   it('accepts a legacy stub: no records, the file pointer on the root table', () => {
     const model = parse(LEGACY_STUB_XML);
     expect(model.recordCount).toBe(0);
@@ -694,7 +711,7 @@ describe('unreadable files', () => {
     expect(model.updated).toBe('2026-09-17');
   });
 
-  it('accepts a DOCTYPE-looking string inside text after the root begins', () => {
+  it('accepts an escaped DOCTYPE-looking string in field text', () => {
     const model = parse(
       `<registry id="x"><title>t</title><record><value>1</value><description>mentions &lt;!DOCTYPE html&gt; literally</description></record></registry>`,
     );

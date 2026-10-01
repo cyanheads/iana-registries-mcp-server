@@ -39,7 +39,8 @@ const BLOCKS = new Set(['paragraph', 't', 'artwork', 'list', 'li']);
 /**
  * `htmlEntities` turns on numeric character references (`&#233;` → `é`); the five
  * XML entities decode either way, and `&amp;#233;` still reads as the literal
- * `&#233;`. A DOCTYPE is rejected before parsing, so no declared entity expands.
+ * `&#233;`. `processEntities` would also expand any entity a DOCTYPE declares,
+ * so a body holding `<!DOCTYPE` anywhere is rejected before it reaches the parser.
  */
 const parser = new XMLParser({
   ignoreAttributes: false,
@@ -452,13 +453,13 @@ function assertRecordless(xml: string, url: string, root: RegistryTable, rootNod
 
 /**
  * Parses an IANA registry XML file. Throws `upstream_unreadable` when the body
- * declares a DOCTYPE (entity expansion stays off), fails to parse, has no
- * `<registry>` root, or holds no records and fails the record-less checks.
+ * holds `<!DOCTYPE` anywhere, in any case (the parser would expand the entities
+ * it declares), fails to parse, has no `<registry>` root, or holds no records
+ * and fails the record-less checks.
  */
 export function parseXmlRegistry(xml: string, url: string): XmlRegistry {
-  const rootStart = xml.indexOf('<registry');
-  if (/<!DOCTYPE/i.test(rootStart === -1 ? xml : xml.slice(0, rootStart))) {
-    throw upstreamUnreadable(`${url} declares a DOCTYPE; registry XML never does.`, { url });
+  if (/<!DOCTYPE/i.test(xml)) {
+    throw upstreamUnreadable(`${url} holds a DOCTYPE; registry XML never does.`, { url });
   }
   let document: XNode[];
   try {

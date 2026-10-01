@@ -70,8 +70,14 @@ const TOP_LEVELS = [
 /** A lowercased `type/subtype` (RFC 6838 restricted-name characters). */
 const TYPE_PATTERN = /^[a-z0-9][a-z0-9!#$&^_.+-]{0,126}\/[a-z0-9][a-z0-9!#$&^_.+-]{0,126}$/;
 
-/** The type or bare subtype after "in favor of", when it is the whole rest of the annotation. */
-const REPLACEMENT = /in favou?r of\s+([A-Za-z0-9][A-Za-z0-9!#$&^_.+/-]*?)\.*\s*$/i;
+/**
+ * The type or bare subtype after "in favor of", when it is the whole rest of the
+ * annotation, trailing dots aside. The name ends on a character other than a
+ * dot, so trailing dots fall to `\.*` without the lazy retry that made a long run
+ * of dots quadratic.
+ */
+const REPLACEMENT =
+  /in favou?r of\s+([A-Za-z0-9](?:[A-Za-z0-9!#$&^_.+/-]*[A-Za-z0-9!#$&^_+/-])?)\.*\s*$/i;
 
 /** A document reference ("RFC9999", "BCP47"), which names no type. */
 const DOCUMENT_REFERENCE = /^(?:rfc|bcp|std)\d*$/i;

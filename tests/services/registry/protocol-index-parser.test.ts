@@ -219,6 +219,68 @@ describe('parseProtocolIndex', () => {
   });
 });
 
+describe('linear-time scanning', () => {
+  const TITLE = '<td><div class="reg-title"><a href="/assignments/a">T</a></div></td>';
+  /** A row whose defining-document cell ends in `cell`, with no `>` after it. */
+  const docCellRow = (cell: string) => `<tr>${TITLE}<td class="reg-doc">${cell}</tr>`;
+
+  it.each([
+    ['200,000 characters of unclosed <tr> rows', () => '<tr>x'.repeat(40_000)],
+    [
+      'a category row of 100,000 "<" with no ">"',
+      () => `<tr class="dtable__group">${'<'.repeat(100_000)}</tr>`,
+    ],
+    [
+      'a row of 40,000 title cells whose links never close',
+      () => `<tr>${'<div class="reg-title"><a>'.repeat(40_000)}</tr>`,
+    ],
+    [
+      'a title link with a 100,000-character attribute name',
+      () =>
+        `<tr><td><div class="reg-title"><a ${'a'.repeat(100_000)} href="/assignments/a">T</a></div></td></tr>`,
+    ],
+    [
+      'a document cell of 1,000 doc links with no ">"',
+      () => docCellRow('<a data-doc-name='.repeat(1_000)),
+    ],
+    [
+      'a document cell of 20,000 unclosed expert spans',
+      () => docCellRow('<span class="reg-expert">'.repeat(20_000)),
+    ],
+    [
+      'a document cell of 40,000 "<span " sharing one ">"',
+      () => docCellRow(`${'<span '.repeat(40_000)}>`),
+    ],
+    [
+      'a document cell of 40,000 unclosed comment spans',
+      () => docCellRow('<span class="iana-protocol-comment">'.repeat(40_000)),
+    ],
+    [
+      'a procedure of 100,000 characters of "; " before its last word',
+      () =>
+        indexPage(
+          entryRow({ href: '/assignments/a', title: 'T', procedure: `${'; '.repeat(50_000)}x` }),
+        ),
+    ],
+  ])('parses %s in under 250 ms', (_label, build) => {
+    const html = build();
+    const started = performance.now();
+    parseProtocolIndex(html);
+    expect(performance.now() - started).toBeLessThan(250);
+  });
+
+  it('still reads the title link and procedure from rows built for the timing cases', () => {
+    const [named] = parseProtocolIndex(
+      `<tr><td><div class="reg-title"><a ${'a'.repeat(1_000)} href="/assignments/a">T</a></div></td></tr>`,
+    ).entries;
+    expect(named).toMatchObject({ registryId: 'a', title: 'T' });
+    const [trimmed] = parseProtocolIndex(
+      indexPage(entryRow({ href: '/assignments/a', title: 'T', procedure: 'Expert Review; ; ' })),
+    ).entries;
+    expect(trimmed?.registrationProcedure).toBe('Expert Review');
+  });
+});
+
 describe('indexFloorError', () => {
   it('accepts a page at the floor: 500 ids and 2,000 entries', () => {
     const index = parseProtocolIndex(indexHtmlWith(INDEX_MIN_REGISTRY_IDS, INDEX_MIN_ENTRIES));
