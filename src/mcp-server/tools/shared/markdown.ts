@@ -2,8 +2,9 @@
  * @fileoverview `format()` sanitizers for upstream-authored text, shared by every
  * tool. `inline()` makes a value safe for one markdown line (headings, bold
  * names, list items, notice fragments), `quote()` renders free text as a
- * blockquote, `url()` makes a URL safe to print. Both text helpers strip control
- * and bidi characters and leave link, image, and HTML syntax inert.
+ * blockquote, `url()` prints an http(s) URL as an autolink and anything else as
+ * inline text. Both text helpers strip control and bidi characters and leave
+ * link, image, and HTML syntax inert.
  * `joinLines()` assembles a `format()` text so every blockquote ends before the
  * next server line. `structuredContent` keeps every upstream field exactly as
  * the service model holds it; a notice, which both surfaces carry, interpolates
@@ -87,14 +88,24 @@ export function joinLines(lines: readonly string[]): string {
   return joined.join('\n');
 }
 
-/** A URL safe to print bare or inside `<…>`: unsafe characters percent-encoded, controls stripped. */
+/** The two schemes `url()` prints as a link. */
+const HTTP_URL = /^https?:\/\//i;
+
+/**
+ * A URL as printed: an http or https URL as an autolink `<…>`, controls stripped
+ * and unsafe characters percent-encoded; any other value (`javascript:`,
+ * `data:`, `file:`, no scheme) as {@link inline} text, which no renderer links.
+ */
 export function url(href: string): string {
-  return href.replace(CONTROL_OR_BIDI, '').replace(URL_UNSAFE, (char) => {
+  const clean = href.replace(CONTROL_OR_BIDI, '');
+  if (!HTTP_URL.test(clean)) return inline(href);
+  const encoded = clean.replace(URL_UNSAFE, (char) => {
     const code = char.charCodeAt(0);
     return code < 0x80
       ? `%${code.toString(16).toUpperCase().padStart(2, '0')}`
       : encodeURIComponent(char);
   });
+  return `<${encoded}>`;
 }
 
 /** One list item per reference: id, type, section, label, and URL (when it differs from the id). */
@@ -102,7 +113,7 @@ export function referenceLines(references: readonly ReferenceView[], indent = ''
   return references.map((ref) => {
     const section = ref.section ? ` §${inline(ref.section)}` : '';
     const label = ref.label ? ` — ${inline(ref.label)}` : '';
-    const link = ref.url && ref.url !== ref.id ? ` <${url(ref.url)}>` : '';
+    const link = ref.url && ref.url !== ref.id ? ` ${url(ref.url)}` : '';
     return `${indent}- ${inline(ref.id)} (${ref.type})${section}${label}${link}`;
   });
 }
@@ -113,7 +124,7 @@ export function sourceLines(source: SourceView): string[] {
     ? ` · registry updated ${inline(source.registry_updated)}`
     : '';
   const lines = [
-    `**Source:** \`${source.registry_id}\`${updated} · fetched ${source.fetched_at} · <${url(source.url)}>`,
+    `**Source:** \`${source.registry_id}\`${updated} · fetched ${source.fetched_at} · ${url(source.url)}`,
   ];
   if (source.stale) {
     lines.push(

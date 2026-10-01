@@ -444,6 +444,23 @@ describe('iana_lookup_media_type: registration template', () => {
     expect(templateFetches(s)).toEqual([tmpl('application/json')]);
   });
 
+  it('drops dot segments from a template path, so the read stays under media-types/', async () => {
+    const s = boot(
+      mediaXml({
+        application: mediaRecord({
+          name: 'vnd.example.dots',
+          alias: 'application/vnd.example.dots',
+          file: 'application/../.././../protocols/.',
+        }),
+      }),
+    );
+    s.serve({ [tmpl('application/protocols')]: () => textResponse(TEMPLATE_LABELLED) });
+    const [row] = rows(await call({ type: 'application/vnd.example.dots' }));
+    expect(row?.template_url).toBe(tmpl('application/protocols'));
+    expect(row?.template).toMatchObject({ fetched: true, file_extensions: '.json' });
+    expect(templateFetches(s)).toEqual([tmpl('application/protocols')]);
+  });
+
   it.each([
     ['a 404', () => statusResponse(404, {}, 'Page not found')],
     ['a 503', () => statusResponse(503)],

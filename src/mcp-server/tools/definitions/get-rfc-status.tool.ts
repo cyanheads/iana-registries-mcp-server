@@ -532,9 +532,9 @@ export const getRfcStatus = tool('iana_get_rfc_status', {
           `**See also:** ${list(rfc.see_also)}`,
         );
         if (rfc.draft_name) lines.push(`**Draft:** ${inline(rfc.draft_name)}`);
-        if (rfc.errata_url) lines.push(`**Errata:** <${url(rfc.errata_url)}>`);
+        if (rfc.errata_url) lines.push(`**Errata:** ${url(rfc.errata_url)}`);
         lines.push(
-          `**RFC Editor:** <${url(rfc.url)}> · **Datatracker:** <${url(rfc.datatracker_url)}>`,
+          `**RFC Editor:** ${url(rfc.url)} · **Datatracker:** ${url(rfc.datatracker_url)}`,
         );
       }
       if (draft) {
@@ -557,7 +557,7 @@ export const getRfcStatus = tool('iana_get_rfc_status', {
         if (draft.became_rfc) lines.push(`**Became:** ${inline(draft.became_rfc)}`);
         lines.push(
           `**Replaces:** ${list(draft.replaces)} · **Replaced by:** ${list(draft.replaced_by)}`,
-          `**Datatracker:** <${url(draft.datatracker_url)}>`,
+          `**Datatracker:** ${url(draft.datatracker_url)}`,
         );
       }
     }

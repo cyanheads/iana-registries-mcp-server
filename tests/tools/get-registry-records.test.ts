@@ -1163,6 +1163,151 @@ describe('iana_get_registry_records: output budget and caps', () => {
     expect(out.structured.notes).toHaveLength(keptCount);
     expect(out.structured.notes_truncated === true).toBe(truncated);
   });
+
+  /** `count` RFC xrefs numbered from 1. */
+  const xrefs = (count: number) =>
+    Array.from({ length: count }, (_, index) => `<xref type="rfc" data="rfc${index + 1}"/>`).join(
+      '',
+    );
+  const rangeXml = (value: string, rule = 'IETF Review', note = '') =>
+    `<range><value>${value}</value><registration_rule>${rule}</registration_rule>${note ? `<note>${note}</note>` : ''}</range>`;
+
+  it('cuts the description, registration procedure, and range text at 2,000 characters', async () => {
+    boot(
+      'long-header',
+      registryXml({
+        id: 'long-header',
+        rule: 'q'.repeat(2_500),
+        body: `<description>${'d'.repeat(2_001)}</description>${rangeXml('r'.repeat(2_100), 'p'.repeat(2_000), 'n'.repeat(3_000))}${recordXml({ value: '1' })}`,
+      }),
+    );
+    const out = await call({ registry: 'long-header' });
+    expect(out.structured).toMatchObject({
+      registration_procedure: `${'q'.repeat(1_999)}…`,
+      description: `${'d'.repeat(1_999)}…`,
+      registration_ranges: [
+        {
+          range: `${'r'.repeat(1_999)}…`,
+          procedure: 'p'.repeat(2_000),
+          note: `${'n'.repeat(1_999)}…`,
+        },
+      ],
+    });
+  });
+
+  it('cuts the root description and procedure on a sub-registry listing', async () => {
+    const subs = ['a', 'b'].map((id) => subregistryXml(id, recordXml({ value: '1' }))).join('');
+    boot(
+      'long-listing',
+      registryXml({
+        id: 'long-listing',
+        rule: 'q'.repeat(2_001),
+        body: `<description>${'d'.repeat(2_500)}</description>${subs}`,
+      }),
+    );
+    const out = await call({ registry: 'long-listing' });
+    expect(out.structured.subregistries).toHaveLength(2);
+    expect(out.structured.registration_procedure).toBe(`${'q'.repeat(1_999)}…`);
+    expect(out.structured.description).toBe(`${'d'.repeat(1_999)}…`);
+  });
+
+  it('keeps the first 25 table references and gives their total in the notice', async () => {
+    boot(
+      'many-refs',
+      registryXml({ id: 'many-refs', body: `${xrefs(30)}${recordXml({ value: '1' })}` }),
+    );
+    const out = await call({ registry: 'many-refs' });
+    const refs = out.structured.references as { id: string }[];
+    expect(refs).toHaveLength(25);
+    expect(refs.at(-1)?.id).toBe('RFC 25');
+    expect(out.structured.notice).toBe('Showing the first 25 of 30 table references.');
+    expect(out.text).toContain('Showing the first 25 of 30 table references.');
+    expect(out.text).not.toContain('RFC 26');
+  });
+
+  it('keeps 25 table references without a notice', async () => {
+    boot(
+      'refs-25',
+      registryXml({ id: 'refs-25', body: `${xrefs(25)}${recordXml({ value: '1' })}` }),
+    );
+    const out = await call({ registry: 'refs-25' });
+    expect(out.structured.references).toHaveLength(25);
+    expect(out.structured).not.toHaveProperty('notice');
+  });
+
+  it('keeps the first 25 references of each record and counts the records cut', async () => {
+    const body = [
+      recordXml({ value: '1' }, xrefs(26)),
+      recordXml({ value: '2' }, xrefs(25)),
+      recordXml({ value: '3' }, xrefs(400)),
+    ].join('');
+    boot('record-refs', registryXml({ id: 'record-refs', body }));
+    const out = await call({ registry: 'record-refs' });
+    expect(records(out).map((row) => row.references.length)).toEqual([25, 25, 25]);
+    expect(records(out)[2]?.references.at(-1)?.id).toBe('RFC 25');
+    expect(out.structured.notice).toBe(
+      '2 records on this page list more than 25 references; only the first 25 of each are shown.',
+    );
+
+    boot(
+      'record-ref',
+      registryXml({ id: 'record-ref', body: recordXml({ value: '1' }, xrefs(30)) }),
+    );
+    const one = await call({ registry: 'record-ref' });
+    expect(one.structured.notice).toBe(
+      'One record on this page lists more than 25 references; only the first 25 are shown.',
+    );
+  });
+
+  it('keeps the first 25 registration ranges and gives their total in the notice', async () => {
+    const ranges = Array.from({ length: 40 }, (_, index) => rangeXml(`${index}-${index}`)).join('');
+    boot(
+      'many-ranges',
+      registryXml({ id: 'many-ranges', body: `${ranges}${recordXml({ value: '1' })}` }),
+    );
+    const out = await call({ registry: 'many-ranges' });
+    const kept = out.structured.registration_ranges as { range: string }[];
+    expect(kept).toHaveLength(25);
+    expect(kept.at(-1)?.range).toBe('24-24');
+    expect(out.structured.notice).toBe('Showing the first 25 of 40 registration ranges.');
+  });
+
+  it('lists the first 250 sub-registries and gives their total in the notice', async () => {
+    const subs = (count: number) =>
+      Array.from({ length: count }, (_, index) =>
+        subregistryXml(`s${index}`, recordXml({ value: '1' })),
+      ).join('');
+    boot('wide-listing', registryXml({ id: 'wide-listing', body: subs(260) }));
+    const out = await call({ registry: 'wide-listing' });
+    const listed = out.structured.subregistries as { id: string }[];
+    expect(listed).toHaveLength(250);
+    expect(listed.at(-1)?.id).toBe('s249');
+    expect(out.structured.notice).toBe(
+      'This registry has 260 sub-registries; call again with subregistry set to one of the listed ids. Showing the first 250 of 260 sub-registries.',
+    );
+    expect(out.text).toContain('**Sub-registries (250):**');
+
+    boot('listing-250', registryXml({ id: 'listing-250', body: subs(250) }));
+    const exact = await call({ registry: 'listing-250' });
+    expect(exact.structured.subregistries).toHaveLength(250);
+    expect(exact.structured.notice).toBe(
+      'This registry has 250 sub-registries; call again with subregistry set to one of the listed ids.',
+    );
+  });
+
+  it('names at most 250 sub-registries in unknown_subregistry', async () => {
+    const subs = Array.from({ length: 300 }, (_, index) =>
+      subregistryXml(`s${index}`, recordXml({ value: '1' })),
+    ).join('');
+    boot('wide-error', registryXml({ id: 'wide-error', body: subs }));
+    const out = await call({ registry: 'wide-error', subregistry: 'nope' });
+    const { data } = errorOf(out);
+    expect(data.subregistries).toHaveLength(250);
+    const hint = (data.recovery as { hint: string }).hint;
+    expect(hint).toContain('s249');
+    expect(hint).not.toContain('s250');
+    expect(hint.endsWith('; 50 more are not named here.')).toBe(true);
+  });
 });
 
 describe('iana_get_registry_records: reading through the index (404 retry)', () => {

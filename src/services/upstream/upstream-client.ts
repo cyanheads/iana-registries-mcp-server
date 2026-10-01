@@ -1,6 +1,7 @@
 /**
  * @fileoverview Plain-fetch boundary for the three keyless upstreams (IANA, RFC
- * Editor, IETF Datatracker): per-host pacers, status accept-lists, content-type
+ * Editor, IETF Datatracker): per-host pacers, status accept-lists, a redirect
+ * check that keeps every answer on those hosts over https, content-type
  * checks, byte-ceiling body reads, a per-attempt timer, and the retry ladder
  * bounded by the caller's {@link CallBudget} and its per-host request
  * allowance. 304 and 404 are results here, not errors, which is why it calls
@@ -84,11 +85,12 @@ export interface UpstreamClientOptions {
   userAgent: string;
 }
 
-const HOSTS: Readonly<Record<string, UpstreamHost>> = {
-  'www.iana.org': 'iana',
-  'www.rfc-editor.org': 'rfc-editor',
-  'datatracker.ietf.org': 'datatracker',
-};
+/** Hostname → pacer. A `Map`, so a redirect's hostname never reaches an object prototype. */
+const HOSTS: ReadonlyMap<string, UpstreamHost> = new Map([
+  ['www.iana.org', 'iana'],
+  ['www.rfc-editor.org', 'rfc-editor'],
+  ['datatracker.ietf.org', 'datatracker'],
+]);
 
 /** Datatracker requests this server starts per minute, across every client. */
 const DATATRACKER_PER_MINUTE = 60;
@@ -226,6 +228,8 @@ export class UpstreamClient implements Disposable {
 
   /**
    * One attempt: fetch, status and content-type checks, byte-capped body read.
+   * Redirects are followed, but an answer whose final URL is not https on one of
+   * the three upstream hosts is unreadable, whatever its status.
    * A status in `accept` is returned; 408/429/5xx throw the classified HTTP error
    * (transient, `Retry-After` honored); any other status throws unreadable. When
    * the per-attempt timer fires the throw is a transient `Timeout`; any other
@@ -252,6 +256,16 @@ export class UpstreamClient implements Disposable {
           `Request to ${host} failed: ${error instanceof Error ? error.message : String(error)}`,
           { host },
           { cause: error },
+        );
+      }
+
+      if (response.redirected && !isUpstreamUrl(response.url)) {
+        await discard(response);
+        const target = URL.parse(response.url)?.origin ?? 'an unparseable URL';
+        throw upstreamUnreadable(
+          `${host} redirected ${url} to ${target}, outside the https upstream hosts this server reads.`,
+          { host, url, redirectedTo: target },
+          { reason },
         );
       }
 
@@ -319,9 +333,15 @@ export class UpstreamClient implements Disposable {
 }
 
 function hostOf(url: string): UpstreamHost {
-  const host = HOSTS[new URL(url).hostname];
+  const host = HOSTS.get(new URL(url).hostname);
   if (!host) throw internalError(`No pacer is configured for ${new URL(url).hostname}.`);
   return host;
+}
+
+/** True when `href` is https on one of {@link HOSTS}: where a followed redirect may land. */
+function isUpstreamUrl(href: string): boolean {
+  const target = URL.parse(href);
+  return target?.protocol === 'https:' && HOSTS.has(target.hostname);
 }
 
 /**

@@ -150,11 +150,11 @@ export const searchRegistries = tool('iana_search_registries', {
         lines.push('**Defining documents:**');
         for (const doc of entry.defining_documents) {
           const title = doc.title ? ` — ${inline(doc.title)}` : '';
-          const link = doc.url ? ` <${url(doc.url)}>` : '';
+          const link = doc.url ? ` ${url(doc.url)}` : '';
           lines.push(`- ${inline(doc.id)}${title}${link}`);
         }
       }
-      lines.push(`**Page:** <${url(entry.page_url)}> · **XML:** <${url(entry.xml_url)}>`, '');
+      lines.push(`**Page:** ${url(entry.page_url)} · **XML:** ${url(entry.xml_url)}`, '');
     }
     lines.push(...sourceLines(result.source));
     return [{ type: 'text', text: lines.join('\n') }];

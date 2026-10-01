@@ -21,6 +21,7 @@ import { compileQuery, matchesQuery } from '@/services/registry/search-text.js';
 import type {
   Loaded,
   ProtocolIndex,
+  RegistrationRange,
   RegistryNote,
   RegistryRecord,
   RegistryTable,
@@ -67,6 +68,12 @@ const NOTES_BUDGET = 4_000;
 const FIELD_MAX = 2_000;
 /** Most fields one record keeps. */
 const MAX_FIELDS = 16;
+/** Most references a table or a record keeps (probed maximum: 9, on a record). */
+const MAX_REFERENCES = 25;
+/** Most registration ranges a table keeps (probed maximum: 8). */
+const MAX_RANGES = 25;
+/** Most sub-registries a listing or an `unknown_subregistry` error names (probed maximum: 127). */
+const MAX_SUBREGISTRIES = 250;
 
 /** Splits the `registry` input into an id and an optional URL fragment. */
 function parseRegistryInput(registry: string): { fragment?: string; id: string } {
@@ -84,6 +91,22 @@ function capText(text: string): { cut: boolean; text: string } {
   return { cut: true, text: `${text.slice(0, end)}…` };
 }
 
+/** {@link capText}'s text, for a value whose cut is disclosed by its ending `…` alone. */
+const capped = (text: string) => capText(text).text;
+
+/** A table's ranges, at most {@link MAX_RANGES}, each text capped. */
+function capRanges(ranges: readonly RegistrationRange[]): RegistrationRange[] {
+  return ranges.slice(0, MAX_RANGES).map(({ range, procedure, note }) => ({
+    range: capped(range),
+    ...(procedure ? { procedure: capped(procedure) } : {}),
+    ...(note ? { note: capped(note) } : {}),
+  }));
+}
+
+/** `Showing the first {max} of {total} {noun}.` when a list was cut at `max`. */
+const cutNotice = (total: number, max: number, noun: string) =>
+  total > max && `Showing the first ${max} of ${total} ${noun}.`;
+
 function toRecordOutput(record: RegistryRecord) {
   const fields: Record<string, string> = {};
   const cutFields: string[] = [];
@@ -92,14 +115,14 @@ function toRecordOutput(record: RegistryRecord) {
       cutFields.push(name);
       return;
     }
-    const capped = capText(text);
-    fields[name] = capped.text;
-    if (capped.cut) cutFields.push(name);
+    const cut = capText(text);
+    fields[name] = cut.text;
+    if (cut.cut) cutFields.push(name);
   });
   return {
-    ...(record.value !== undefined ? { value: capText(record.value).text } : {}),
+    ...(record.value !== undefined ? { value: capped(record.value) } : {}),
     fields,
-    references: record.references,
+    references: record.references.slice(0, MAX_REFERENCES),
     ...(record.registered ? { registered: record.registered } : {}),
     ...(record.updated ? { updated: record.updated } : {}),
     ...(cutFields.length > 0 ? { cut_fields: cutFields } : {}),
@@ -269,17 +292,19 @@ export const getRegistryRecords = tool('iana_get_registry_records', {
     registration_procedure: z
       .string()
       .optional()
-      .describe('Registration rule of the table read, or of the registry when listing.'),
+      .describe(
+        'Registration rule of the table read, or of the registry when listing; at most 2,000 characters.',
+      ),
     description: z
       .string()
       .optional()
       .describe(
-        'Description of the table read, or of the registry when listing; a YANG module registry names its module file here.',
+        'Description of the table read, or of the registry when listing; a YANG module registry names its module file here. At most 2,000 characters.',
       ),
     references: z
       .array(ReferenceSchema)
       .optional()
-      .describe('The documents that define the table read.'),
+      .describe('The documents that define the table read, the first 25.'),
     registration_ranges: z
       .array(
         z
@@ -291,7 +316,9 @@ export const getRegistryRecords = tool('iana_get_registry_records', {
           .describe('One allocation range.'),
       )
       .optional()
-      .describe('Allocation ranges, when the table defines them.'),
+      .describe(
+        'Allocation ranges, when the table defines them: the first 25, each text at most 2,000 characters.',
+      ),
     notes: z
       .array(
         z
@@ -317,7 +344,9 @@ export const getRegistryRecords = tool('iana_get_registry_records', {
             fields: z
               .record(z.string(), z.string())
               .describe('Values keyed by XML element name, each capped at 2,000 characters.'),
-            references: z.array(ReferenceSchema).describe('References on the record.'),
+            references: z
+              .array(ReferenceSchema)
+              .describe('References on the record, the first 25.'),
             registered: z.string().optional().describe('Registration date.'),
             updated: z.string().optional().describe('Last-updated date.'),
             cut_fields: z
@@ -339,7 +368,9 @@ export const getRegistryRecords = tool('iana_get_registry_records', {
           .describe('One sub-registry.'),
       )
       .optional()
-      .describe('Present when a sub-registry must be chosen; records is then empty.'),
+      .describe(
+        'Present when a sub-registry must be chosen, the first 250; records is then empty.',
+      ),
     next_cursor: z
       .string()
       .optional()
@@ -455,7 +486,8 @@ export const getRegistryRecords = tool('iana_get_registry_records', {
       const wanted = requestedSub.toLowerCase();
       table = tables.find((candidate) => candidate.id.toLowerCase() === wanted);
       if (!table) {
-        const ids = selectable.map((candidate) => candidate.id);
+        const ids = selectable.slice(0, MAX_SUBREGISTRIES).map((candidate) => candidate.id);
+        const unnamed = selectable.length - ids.length;
         throw ctx.fail(
           'unknown_subregistry',
           `"${requestedSub}" is not a sub-registry of ${inline(model.id)}.`,
@@ -466,7 +498,7 @@ export const getRegistryRecords = tool('iana_get_registry_records', {
             recovery: {
               hint:
                 ids.length > 0
-                  ? `Call iana_get_registry_records again with subregistry set to one of: ${ids.map(inline).join(', ')}.`
+                  ? `Call iana_get_registry_records again with subregistry set to one of: ${ids.map(inline).join(', ')}${unnamed > 0 ? `; ${unnamed} more are not named here` : ''}.`
                   : `${inline(model.id)} has no sub-registries; call iana_get_registry_records again without subregistry.`,
             },
           },
@@ -522,19 +554,20 @@ export const getRegistryRecords = tool('iana_get_registry_records', {
         more: false,
         fragments: [
           `This registry has ${selectable.length} sub-registries; call again with subregistry set to one of the listed ids.`,
+          cutNotice(selectable.length, MAX_SUBREGISTRIES, 'sub-registries'),
         ],
       });
       return {
         ...header,
         ...(model.root.registrationRule
-          ? { registration_procedure: model.root.registrationRule }
+          ? { registration_procedure: capped(model.root.registrationRule) }
           : {}),
-        ...(model.root.description ? { description: model.root.description } : {}),
+        ...(model.root.description ? { description: capped(model.root.description) } : {}),
         notes: rootNotes.notes,
         ...(rootNotes.truncated ? { notes_truncated: true } : {}),
         columns: [],
         records: [],
-        subregistries: selectable.map((candidate) => ({
+        subregistries: selectable.slice(0, MAX_SUBREGISTRIES).map((candidate) => ({
           id: candidate.id,
           title: candidate.title,
           record_count: candidate.records.length,
@@ -554,6 +587,7 @@ export const getRegistryRecords = tool('iana_get_registry_records', {
     const records: RecordOutput[] = [];
     let used = 2;
     let budgetCut = false;
+    let referencesCut = 0;
     for (const match of matches.slice(offset)) {
       if (records.length >= input.limit) break;
       const record = toRecordOutput(match);
@@ -564,6 +598,7 @@ export const getRegistryRecords = tool('iana_get_registry_records', {
       }
       records.push(record);
       used += size;
+      if (match.references.length > MAX_REFERENCES) referencesCut++;
     }
     const nextOffset = offset + records.length;
     const more = nextOffset < matches.length;
@@ -608,6 +643,12 @@ export const getRegistryRecords = tool('iana_get_registry_records', {
         mintedFor !== undefined &&
           mintedFor !== (source.registry_updated ?? '') &&
           `The registry was updated since this cursor was minted (${inline(mintedFor)} → ${inline(source.registry_updated ?? 'no date')}); record offsets may have shifted.`,
+        cutNotice(table.references.length, MAX_REFERENCES, 'table references'),
+        cutNotice(table.ranges.length, MAX_RANGES, 'registration ranges'),
+        referencesCut > 0 &&
+          (referencesCut === 1
+            ? `One record on this page lists more than ${MAX_REFERENCES} references; only the first ${MAX_REFERENCES} are shown.`
+            : `${referencesCut} records on this page list more than ${MAX_REFERENCES} references; only the first ${MAX_REFERENCES} of each are shown.`),
         more &&
           (budgetCut
             ? `This page stopped at the ${RECORDS_BUDGET.toLocaleString('en-US')}-character output budget after ${records.length} records; ${remaining} more match. Pass next_cursor as cursor to continue.`
@@ -620,10 +661,12 @@ export const getRegistryRecords = tool('iana_get_registry_records', {
     return {
       ...header,
       ...(isRoot ? {} : { subregistry_id: table.id, subregistry_title: table.title }),
-      ...(table.registrationRule ? { registration_procedure: table.registrationRule } : {}),
-      ...(table.description ? { description: table.description } : {}),
-      ...(table.references.length > 0 ? { references: table.references } : {}),
-      ...(table.ranges.length > 0 ? { registration_ranges: table.ranges } : {}),
+      ...(table.registrationRule ? { registration_procedure: capped(table.registrationRule) } : {}),
+      ...(table.description ? { description: capped(table.description) } : {}),
+      ...(table.references.length > 0
+        ? { references: table.references.slice(0, MAX_REFERENCES) }
+        : {}),
+      ...(table.ranges.length > 0 ? { registration_ranges: capRanges(table.ranges) } : {}),
       notes: notes.notes,
       ...(notes.truncated ? { notes_truncated: true } : {}),
       columns: table.columns,

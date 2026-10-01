@@ -151,6 +151,64 @@ describe('single attempt: accept-lists', () => {
   });
 });
 
+/** `response` as `fetch` returns it after following redirects to `finalUrl`. */
+function redirectedTo(response: Response, finalUrl: string): Response {
+  Object.defineProperty(response, 'url', { value: finalUrl });
+  Object.defineProperty(response, 'redirected', { value: true });
+  return response;
+}
+
+describe('redirects', () => {
+  it.each([
+    ['within www.iana.org', IANA_URL, 'https://www.iana.org/assignments/example/moved.xml'],
+    ['within www.rfc-editor.org', RFC_URL, 'https://www.rfc-editor.org/rfc/rfc9999.json?moved'],
+    ['within datatracker.ietf.org', DT_URL, 'https://datatracker.ietf.org/doc/rfc9999/'],
+    ['to another upstream host', DT_URL, 'https://www.rfc-editor.org/rfc/rfc9999.json'],
+  ])('reads an answer redirected %s', async (_label, from, to) => {
+    const h = createHarness([
+      { match: from, respond: () => redirectedTo(xmlResponse('<a/>'), to) },
+    ]);
+    await expect(h.client.request(from, options())).resolves.toBe('<a/>');
+  });
+
+  it.each([
+    ['another host', IANA_URL, 'https://evil.example/registry.xml'],
+    [
+      'plain http on the same host',
+      IANA_URL,
+      'http://www.iana.org/assignments/example/example.xml',
+    ],
+    ['a look-alike host', RFC_URL, 'https://www.rfc-editor.org.evil.example/rfc9999.json'],
+    ['a sub-domain of an upstream host', DT_URL, 'https://x.datatracker.ietf.org/doc.json'],
+    ['a host named like an object key', DT_URL, 'https://constructor/doc.json'],
+  ])('fails unreadable when a redirect lands on %s', async (_label, from, to) => {
+    const h = createHarness([
+      { match: from, respond: () => redirectedTo(xmlResponse('<a/>'), to) },
+    ]);
+    const { error } = await settle(() => h.client.request(from, options()));
+    const failure = asMcpError(error);
+    const target = new URL(to).origin;
+    expect(failure.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+    expect(failure.data).toMatchObject({
+      reason: 'upstream_unreadable',
+      url: from,
+      redirectedTo: target,
+    });
+    expect(failure.message).toContain(`redirected ${from} to ${target}`);
+  });
+
+  it('fails unreadable, not missing, when a redirect off the upstream hosts answers 404', async () => {
+    const h = createHarness([
+      {
+        match: IANA_URL,
+        respond: () => redirectedTo(statusResponse(404), 'https://evil.example/missing'),
+      },
+    ]);
+    const { error } = await settle(() => h.client.request(IANA_URL, raw({ accept: [200, 404] })));
+    expect(asMcpError(error).data).toMatchObject({ reason: 'upstream_unreadable' });
+  });
+});
+
 describe('content-type check', () => {
   it.each([
     ['xml', 'application/xml'],

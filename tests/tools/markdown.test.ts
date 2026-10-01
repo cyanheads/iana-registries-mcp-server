@@ -219,50 +219,77 @@ describe('quote', () => {
 });
 
 describe('url', () => {
-  it('leaves a plain URL untouched', () => {
+  /** The URL inside an autolink `url()` printed, failing when it printed none. */
+  const linked = (out: string) => {
+    expect(out.startsWith('<') && out.endsWith('>'), out).toBe(true);
+    return out.slice(1, -1);
+  };
+
+  it('prints a plain http or https URL as an autolink, untouched inside', () => {
     const plain =
       'https://www.iana.org/assignments/tls-parameters/tls-parameters.xml#sub-1?a=1&b=2';
-    expect(url(plain)).toBe(plain);
+    expect(url(plain)).toBe(`<${plain}>`);
+    expect(url('http://example.org/a')).toBe('<http://example.org/a>');
+    expect(url('HTTPS://EXAMPLE.ORG/a')).toBe('<HTTPS://EXAMPLE.ORG/a>');
+  });
+
+  it.each([
+    'javascript:alert(1)',
+    'JavaScript:alert(1)',
+    'data:text/html,<script>x</script>',
+    'file:///etc/passwd',
+    'ftp://example.org/x',
+    'mailto:list@example.org',
+    'vbscript:x',
+    '//example.org/x',
+    'example.org/x',
+    'https:example.org',
+    ' https://example.org/',
+    '',
+  ])('prints %j as inline text, never as a link', (href) => {
+    const out = url(href);
+    expect(out).toBe(inline(href));
+    expect(out.startsWith('<')).toBe(false);
   });
 
   it('percent-encodes whitespace, quotes, brackets, parentheses, angle brackets, and backslash', () => {
     expect(url('https://example.org/a b"c\'d`e(f)[g]<h>\\i')).toBe(
-      'https://example.org/a%20b%22c%27d%60e%28f%29%5Bg%5D%3Ch%3E%5Ci',
+      '<https://example.org/a%20b%22c%27d%60e%28f%29%5Bg%5D%3Ch%3E%5Ci>',
     );
   });
 
   it('breaks no autolink or link destination: a hostile URL stays one inert token', () => {
     const hostile = 'https://example.org/x)>\n[y](https://evil.example "t") <b>';
     const out = url(hostile);
-    expect(out).not.toMatch(/[\s<>()[\]"']/);
-    expect(`<${out}>`.indexOf('>')).toBe(`<${out}>`.length - 1);
+    expect(linked(out)).not.toMatch(/[\s<>()[\]"']/);
+    expect(out.indexOf('>')).toBe(out.length - 1);
   });
 
   it('encodes non-ASCII whitespace as UTF-8 percent escapes', () => {
     expect(url('https://example.org/a\u00A0b\u2003c\u2028d')).toBe(
-      'https://example.org/a%C2%A0b%E2%80%83c%E2%80%A8d',
+      '<https://example.org/a%C2%A0b%E2%80%83c%E2%80%A8d>',
     );
   });
 
   it('strips control and bidi characters instead of encoding them', () => {
-    expect(url('https://exa\u0000mple.org/\r\n\tpath\u202E')).toBe('https://example.org/path');
-    expect(url(`https://example.org/${BIDI.join('')}`)).toBe('https://example.org/');
+    expect(url('https://exa\u0000mple.org/\r\n\tpath\u202E')).toBe('<https://example.org/path>');
+    expect(url(`https://example.org/${BIDI.join('')}`)).toBe('<https://example.org/>');
+    expect(url('\u0000java\u202Escript:alert(1)')).toBe('javascript:alert(1)');
   });
 
-  it('keeps existing percent escapes, so it is idempotent', () => {
+  it('keeps existing percent escapes, so it is idempotent on the printed URL', () => {
     const once = url('https://example.org/a b%20c[d]');
-    expect(once).toBe('https://example.org/a%20b%20c%5Bd%5D');
-    expect(url(once)).toBe(once);
+    expect(once).toBe('<https://example.org/a%20b%20c%5Bd%5D>');
+    expect(url(linked(once))).toBe(once);
   });
 
-  it('does not throw on a lone surrogate and returns "" for ""', () => {
-    expect(url('https://example.org/\ud800')).toBe('https://example.org/\ud800');
-    expect(url('')).toBe('');
+  it('does not throw on a lone surrogate', () => {
+    expect(url('https://example.org/\ud800')).toBe('<https://example.org/\ud800>');
   });
 
   it('never emits whitespace, a control or bidi character, or an angle bracket (fuzz)', () => {
     for (const hostile of hostileStrings(500)) {
-      const out = url(`https://example.org/${hostile}`);
+      const out = linked(url(`https://example.org/${hostile}`));
       expect(out, JSON.stringify(hostile)).not.toMatch(/[\s<>[\]()"'`\\]/u);
       expect(out, JSON.stringify(hostile)).not.toMatch(CONTROL);
     }
@@ -270,7 +297,8 @@ describe('url', () => {
 
   it('handles very long runs in linear time', () => {
     const started = performance.now();
-    expect(url(' '.repeat(500_000))).toBe('%20'.repeat(500_000));
+    expect(url(`https://x/${' '.repeat(500_000)}`)).toBe(`<https://x/${'%20'.repeat(500_000)}>`);
+    expect(url(`https://${'a'.repeat(2_000_000)}`)).toHaveLength(2_000_010);
     expect(url('a'.repeat(2_000_000))).toHaveLength(2_000_000);
     expect(performance.now() - started).toBeLessThan(2_000);
   });
@@ -299,6 +327,12 @@ describe('referenceLines', () => {
 
   it('indents each item', () => {
     expect(referenceLines([{ type: 'note', id: 'n1' }], '  ')).toEqual(['  - n1 (note)']);
+  });
+
+  it('prints a reference URL that is not http or https as text, not a link', () => {
+    expect(referenceLines([{ type: 'uri', id: 'spec', url: 'javascript:alert(1)' }])).toEqual([
+      '- spec (uri) javascript:alert(1)',
+    ]);
   });
 
   it('sanitizes id, section, label, and URL', () => {

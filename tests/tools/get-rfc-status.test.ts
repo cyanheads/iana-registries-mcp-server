@@ -1280,6 +1280,18 @@ describe('iana_get_rfc_status: format()', () => {
     );
   });
 
+  it.each(['javascript:alert(1)', 'data:text/html,<b>x</b>', 'file:///etc/passwd'])(
+    'prints an errata value %s as inert text, never as a link',
+    async (errata) => {
+      const s = boot();
+      serveRfc(s, 8001, { rfc: () => jsonResponse(rfcJson(8001, { errata_url: errata })) });
+      const out = await call({ ids: ['RFC 8001'] });
+      expect(JSON.stringify(out.structured)).toContain(JSON.stringify(errata));
+      const line = out.text.split('\n').find((text) => text.startsWith('**Errata:**'));
+      expect(line).toBe(`**Errata:** ${errata.replace(/[<>]/g, '\\$&')}`);
+    },
+  );
+
   it('prints every field of a draft', async () => {
     const s = boot();
     serveDraft(s, DRAFT, {

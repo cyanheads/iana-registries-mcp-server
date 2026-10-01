@@ -242,7 +242,7 @@ export const lookupUriScheme = tool('iana_lookup_uri_scheme', {
         lines.push(`**Well-known URI support:** ${inline(scheme.well_known_uri_support)}`);
       }
       if (scheme.notes) lines.push('**Notes:**', quote(scheme.notes));
-      if (scheme.template_url) lines.push(`**Template:** <${url(scheme.template_url)}>`);
+      if (scheme.template_url) lines.push(`**Template:** ${url(scheme.template_url)}`);
       const dates = datesLine(scheme);
       if (dates) lines.push(dates);
       if (scheme.references.length > 0) {

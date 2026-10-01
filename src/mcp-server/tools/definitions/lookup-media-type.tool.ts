@@ -118,9 +118,15 @@ function replacementOf(annotation: string | undefined, topLevel: string): string
   return TYPE_PATTERN.test(type.toLowerCase()) ? type : undefined;
 }
 
+/**
+ * The template URL under {@link TEMPLATE_BASE}. `.` and `..` segments are dropped,
+ * since the URL parser would resolve them and send the template read elsewhere
+ * on iana.org; a `%` is encoded, so no escaped dot can stand in for one.
+ */
 function templateUrlOf(path: string): string {
   const segments = path
     .split('/')
+    .filter((segment) => segment !== '.' && segment !== '..')
     .map((segment) => segment.replace(PATH_UNSAFE, (char) => encodeURIComponent(char)));
   return `${TEMPLATE_BASE}${segments.join('/')}`;
 }
@@ -366,7 +372,7 @@ export const lookupMediaType = tool('iana_lookup_media_type', {
       );
       if (mediaType.status_note) lines.push(`**Status note:** ${inline(mediaType.status_note)}`);
       if (mediaType.replaced_by) lines.push(`**Replaced by:** ${inline(mediaType.replaced_by)}`);
-      lines.push(`**Template:** <${url(mediaType.template_url)}>`);
+      lines.push(`**Template:** ${url(mediaType.template_url)}`);
       const dates = datesLine(mediaType);
       if (dates) lines.push(dates);
       if (mediaType.references.length > 0) {
