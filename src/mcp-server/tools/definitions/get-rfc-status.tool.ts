@@ -3,9 +3,9 @@
  * 10 RFCs or Internet-Drafts per call, from the RFC Editor and the IETF
  * Datatracker. Each id is classified and resolved on its own, so one bad id
  * never fails the batch: a miss is `found: false` with guidance; an upstream
- * failure, or an id left unresolved when the call reaches its Datatracker
- * request limit, lands in `failed[]`; and the call fails only when every id
- * failed.
+ * failure, an id whose planned Datatracker requests do not fit the call's
+ * request limit, or one that retries cut off at that limit, lands in
+ * `failed[]`; and the call fails only when every id failed.
  * @module mcp-server/tools/definitions/get-rfc-status
  */
 
@@ -14,6 +14,7 @@ import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import {
   datatrackerPageUrl,
   getIetfDocService,
+  revisionSuffix,
   rfcPageUrl,
 } from '@/services/ietf/ietf-doc-service.js';
 import { type CallBudget, startCallBudget } from '@/services/upstream/call-budget.js';
@@ -24,7 +25,7 @@ import { inline, url } from '../shared/markdown.js';
 const MAX_IDS = 10;
 
 /** The `failed[].error` of an id the call's Datatracker request limit left unresolved. */
-const REQUEST_LIMIT_MESSAGE = `Not resolved: this call reached its limit of ${DATATRACKER_CALL_REQUESTS} Datatracker requests first. Call iana_get_rfc_status again with this id.`;
+const REQUEST_LIMIT_MESSAGE = `Not resolved within this call's limit of ${DATATRACKER_CALL_REQUESTS} Datatracker requests. Call iana_get_rfc_status again with this id.`;
 
 /**
  * `ids` preprocess: one string splits on commas, semicolons, and newlines (a
@@ -83,6 +84,41 @@ function classify(raw: string): Requested {
       ? 'BCP, STD, and FYI numbers are series labels, not documents; pass the member RFC numbers instead.'
       : `${raw} is neither an RFC number nor a draft name.`,
   };
+}
+
+/**
+ * Datatracker requests an id needs when every read answers first time: an RFC's
+ * `doc.json`; a draft's `doc.json` and two `relateddocument` pages, plus the
+ * second `doc.json` a revision suffix costs.
+ */
+function plannedRequests(requested: Requested): number {
+  switch (requested.kind) {
+    case 'rfc':
+      return 1;
+    case 'draft':
+      return revisionSuffix(requested.name) ? 4 : 3;
+    case 'unsupported':
+      return 0;
+  }
+}
+
+/**
+ * The ids a call starts, chosen before any request: each id, in request order,
+ * whose planned requests still fit the call's Datatracker limit. An id that
+ * does not fit is passed over, not a stop, since a later RFC or plain draft may
+ * still fit. The first id always fits, so calling again with the ids left out
+ * always starts at least one.
+ */
+function admit(requests: readonly Requested[]): Set<Requested> {
+  let planned = 0;
+  return new Set(
+    requests.filter((requested) => {
+      const cost = plannedRequests(requested);
+      if (planned + cost > DATATRACKER_CALL_REQUESTS) return false;
+      planned += cost;
+      return true;
+    }),
+  );
 }
 
 const GroupSchema = z
@@ -302,7 +338,7 @@ function groupText(group: z.infer<typeof GroupSchema>): string {
 
 export const getRfcStatus = tool('iana_get_rfc_status', {
   title: 'Get RFC and Internet-Draft status',
-  description: `Get the current status of up to 10 RFCs or Internet-Drafts in one call. Accepts "RFC 9110", "rfc9110", "9110", RFC Editor or Datatracker URLs, and draft names with or without a revision suffix ("draft-ietf-httpbis-semantics-19"). RFCs return current and as-published status, stream, working group, obsoletes/obsoleted-by and updates/updated-by relations, and the errata page; drafts return their state, IESG state, intended status, expiry, the document that replaced them, and the RFC they became. Unknown ids return found: false. BCP, STD, and FYI numbers are not resolved. A call makes at most ${DATATRACKER_CALL_REQUESTS} Datatracker requests, retries included (an RFC needs one, a draft three, or four with a revision suffix); ids past that come back in failed with reason request_limit, so split more than five drafts across calls.`,
+  description: `Get the current status of up to 10 RFCs or Internet-Drafts in one call. Accepts "RFC 9110", "rfc9110", "9110", RFC Editor or Datatracker URLs, and draft names with or without a revision suffix ("draft-ietf-httpbis-semantics-19"). RFCs return current and as-published status, stream, working group, obsoletes/obsoleted-by and updates/updated-by relations, and the errata page; drafts return their state, IESG state, intended status, expiry, the document that replaced them, and the RFC they became. Unknown ids return found: false. BCP, STD, and FYI numbers are not resolved. A call makes at most ${DATATRACKER_CALL_REQUESTS} Datatracker requests, retries included (an RFC needs one, a draft three, or four with a revision suffix): each id is taken in request order if its requests still fit, and the others come back in failed with reason request_limit, to pass in another call.`,
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
     ids: z
@@ -399,7 +435,7 @@ export const getRfcStatus = tool('iana_get_rfc_status', {
     {
       reason: 'request_limit',
       code: JsonRpcErrorCode.RateLimited,
-      when: `The call reached its limit of ${DATATRACKER_CALL_REQUESTS} Datatracker requests, a third of this server's per-minute Datatracker pacing, before every id was resolved. The ids left over land in failed with this reason; the call itself fails with it only when no id resolved.`,
+      when: `An id did not fit within the call's limit of ${DATATRACKER_CALL_REQUESTS} Datatracker requests, a third of this server's per-minute Datatracker pacing, or retries used up the limit before it resolved. Those ids land in failed with this reason; the call itself fails with it only when no id resolved.`,
       recovery: 'Call iana_get_rfc_status again with just the ids that failed with request_limit.',
       retryable: true,
     },
@@ -415,8 +451,13 @@ export const getRfcStatus = tool('iana_get_rfc_status', {
       return true;
     });
 
+    const admitted = admit(requests);
+
     const outcomes = await Promise.all(
       requests.map(async (requested) => {
+        if (!admitted.has(requested)) {
+          return { requested, error: ctx.fail('request_limit', REQUEST_LIMIT_MESSAGE) };
+        }
         try {
           return { requested, resolved: await resolve(requested, budget, ctx) };
         } catch (error) {

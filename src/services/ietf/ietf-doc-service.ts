@@ -58,6 +58,15 @@ export function rfcPageUrl(number: number): string {
   return `${RFC_EDITOR_ORIGIN}/rfc/rfc${number}.html`;
 }
 
+/**
+ * The two-digit revision suffix of a draft name (`-07` → "07"), or `undefined`.
+ * Datatracker answers a suffixed name 404, so {@link IetfDocService.findDraft}
+ * reads the name again without it.
+ */
+export function revisionSuffix(name: string): string | undefined {
+  return /-(\d{2})$/.exec(name)?.[1];
+}
+
 /** The Datatracker page of a document (`rfcN` or a draft name without revision). */
 export function datatrackerPageUrl(name: string): string {
   return `${DATATRACKER_ORIGIN}/doc/${encodeURIComponent(name)}/`;
@@ -263,7 +272,7 @@ export class IetfDocService {
   async findDraft(name: string, budget: CallBudget): Promise<DraftLookup | undefined> {
     const doc = await this.#getDoc(name, budget, 'IetfDocService.findDraft');
     if (doc) return { draft: toDraftRecord(doc.json, doc.url) };
-    const revision = /-(\d{2})$/.exec(name)?.[1];
+    const revision = revisionSuffix(name);
     if (!revision) return;
     const base = await this.#getDoc(name.slice(0, -3), budget, 'IetfDocService.findDraft');
     return base && { draft: toDraftRecord(base.json, base.url), requestedRevision: revision };

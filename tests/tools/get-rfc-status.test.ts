@@ -9,9 +9,9 @@
  * read included, each entry carrying its reason when classified), the rethrow
  * only when every id failed, the stream-and-group notice, a cancelled call
  * reporting no per-id failures, the `pacer_shed` rows for both hosts, the
- * `request_limit` rows (20 Datatracker requests per call, retries counted, the
- * ids past them in `failed[]` with a notice), and `format()` parity and
- * sanitizing.
+ * `request_limit` rows (ids admitted in request order by planned cost within 20
+ * Datatracker requests per call, retries counted, the ids left out in
+ * `failed[]` unrequested with a notice), and `format()` parity and sanitizing.
  * Upstream I/O is a `createFetchMock` fake; every author and address is invented.
  */
 
@@ -1060,13 +1060,22 @@ describe('iana_get_rfc_status: pacer_shed', () => {
 
 describe('iana_get_rfc_status: request_limit', () => {
   const DRAFTS = [...'abcdefghij'].map((letter) => `draft-example-wg-${letter}`);
+  /** The same drafts asked for at revision 07, which Datatracker answers 404 before the plain name is read. */
+  const SUFFIXED = DRAFTS.map((name) => `${name}-07`);
   const RFCS = Array.from({ length: 10 }, (_, index) => 8001 + index);
   const LIMIT_HINT =
     'Call iana_get_rfc_status again with just the ids that failed with request_limit.';
   const LIMIT_MESSAGE =
-    'Not resolved: this call reached its limit of 20 Datatracker requests first. Call iana_get_rfc_status again with this id.';
+    "Not resolved within this call's limit of 20 Datatracker requests. Call iana_get_rfc_status again with this id.";
   const datatrackerFetches = (s: Setup) =>
     s.fetched().filter((url) => url.startsWith('https://datatracker.ietf.org/')).length;
+  const limitFailures = (ids: readonly string[]) =>
+    ids.map((id) => ({ id, error: LIMIT_MESSAGE, reason: 'request_limit' }));
+  /** Serves draft `name` asked for as `name-07`: a 404 for the suffixed name, then the plain draft. */
+  const serveSuffixed = (s: Setup, name: string) => {
+    s.serve({ [docUrl(`${name}-07`)]: notFound });
+    serveDraft(s, name);
+  };
 
   it('declares request_limit as retryable RateLimited, its when text naming the 20-request limit', () => {
     expect(DATATRACKER_CALL_REQUESTS).toBe(20);
@@ -1079,24 +1088,61 @@ describe('iana_get_rfc_status: request_limit', () => {
     expect(entry?.when).toContain('20 Datatracker requests');
   });
 
-  it('starts at most 20 Datatracker requests and returns the ids past them in failed', async () => {
+  it('takes six plain drafts on 18 requests and returns the four that do not fit in failed, unrequested', async () => {
     const s = boot();
     for (const name of DRAFTS) serveDraft(s, name);
     const out = await call({ ids: DRAFTS });
     expect(out.isError).toBe(false);
-    expect(datatrackerFetches(s)).toBe(20);
-    expect(docs(out)).toHaveLength(5);
-    expect(failed(out)).toHaveLength(5);
-    expect([...docIds(out), ...failed(out).map((failure) => failure.id)].sort()).toEqual(DRAFTS);
-    for (const failure of failed(out)) {
-      expect(failure).toEqual({ id: failure.id, error: LIMIT_MESSAGE, reason: 'request_limit' });
-    }
-    const cut = failed(out).map((failure) => failure.id);
+    expect(datatrackerFetches(s)).toBe(18);
+    expect(docIds(out)).toEqual(DRAFTS.slice(0, 6));
+    const cut = DRAFTS.slice(6);
+    expect(failed(out)).toEqual(limitFailures(cut));
+    expect(s.fetched().filter((url) => cut.some((name) => url.includes(name)))).toEqual([]);
     expect(out.structured.notice).toBe(
       `${cut.join(', ')} were not resolved within this call's limit of 20 Datatracker requests; call iana_get_rfc_status again with them.`,
     );
     expect(out.text).toContain(String(out.structured.notice));
     expect(out.text).toContain(`- ${cut[0]}: ${LIMIT_MESSAGE} (request_limit)`);
+  });
+
+  it('takes five drafts given with a revision suffix, four requests each', async () => {
+    const s = boot();
+    for (const name of DRAFTS) serveSuffixed(s, name);
+    const out = await call({ ids: SUFFIXED });
+    expect(out.isError).toBe(false);
+    expect(datatrackerFetches(s)).toBe(20);
+    expect(docIds(out)).toEqual(DRAFTS.slice(0, 5));
+    expect(docs(out).map((doc) => doc.draft?.requested_revision)).toEqual(Array(5).fill('07'));
+    expect(failed(out)).toEqual(limitFailures(SUFFIXED.slice(5)));
+  });
+
+  it('takes a mixed list in request order, passing over an id that does not fit for a later one that does', async () => {
+    const s = boot();
+    const plain = DRAFTS.slice(0, 6);
+    for (const n of [8001, 8002, 8003]) serveRfc(s, n);
+    for (const name of plain) serveDraft(s, name);
+    serveSuffixed(s, 'draft-example-wg-g');
+    // Planned: RFC 8001 1, six plain drafts 19, the suffixed draft 23 (over), RFC 8002 20, RFC 8003 21 (over).
+    const out = await call({
+      ids: ['RFC 8001', ...plain, 'draft-example-wg-g-07', 'RFC 8002', 'RFC 8003'],
+    });
+    expect(out.isError).toBe(false);
+    expect(datatrackerFetches(s)).toBe(20);
+    expect(docIds(out)).toEqual(['RFC 8001', ...plain, 'RFC 8002']);
+    expect(failed(out)).toEqual(limitFailures(['draft-example-wg-g-07', 'RFC 8003']));
+    expect(s.fetched()).not.toContain(rfcJsonUrl(8003));
+  });
+
+  it('makes progress on every call: the ids one call left out resolve on the next', async () => {
+    const s = boot();
+    for (const name of DRAFTS) serveSuffixed(s, name);
+    const first = await call({ ids: SUFFIXED });
+    const cut = failed(first).map((failure) => failure.id);
+    expect(cut).toEqual(SUFFIXED.slice(5));
+    const second = await call({ ids: cut });
+    expect(second.isError).toBe(false);
+    expect(failed(second)).toEqual([]);
+    expect(docIds(second)).toEqual(DRAFTS.slice(5));
   });
 
   it('names one cut id in the singular, ahead of the stream-and-group fragment', async () => {
@@ -1105,12 +1151,10 @@ describe('iana_get_rfc_status: request_limit', () => {
     for (const name of drafts) serveDraft(s, name);
     serveRfc(s, 8001, { tracking: notFound });
     const out = await call({ ids: [...drafts, 'RFC 8001'] });
-    expect(datatrackerFetches(s)).toBe(20);
-    expect(failed(out)).toEqual([
-      { id: expect.any(String), error: LIMIT_MESSAGE, reason: 'request_limit' },
-    ]);
+    expect(datatrackerFetches(s)).toBe(19);
+    expect(failed(out)).toEqual(limitFailures(['draft-example-wg-g']));
     expect(out.structured.notice).toBe(
-      `${failed(out)[0]?.id} was not resolved within this call's limit of 20 Datatracker requests; call iana_get_rfc_status again with it. Stream and working group were unavailable for RFC 8001; status and relations come from the RFC Editor.`,
+      "draft-example-wg-g was not resolved within this call's limit of 20 Datatracker requests; call iana_get_rfc_status again with it. Stream and working group were unavailable for RFC 8001; status and relations come from the RFC Editor.",
     );
   });
 
@@ -1136,9 +1180,22 @@ describe('iana_get_rfc_status: request_limit', () => {
     expect(docs(out).every((doc) => doc.rfc?.stream === 'IETF')).toBe(true);
   });
 
-  it('fails the call with request_limit when the limit cut every id', async () => {
+  it('fails the call with the upstream error, not request_limit, when every admitted draft fails upstream', async () => {
     const s = boot();
     for (const name of DRAFTS) serveDraft(s, name, { doc: () => statusResponse(503) });
+    const out = await call({ ids: DRAFTS });
+    expect(out.isError).toBe(true);
+    expect(out.structured.error).toMatchObject({
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      data: { status: 503, retryAttempts: 3 },
+    });
+    expect(datatrackerFetches(s)).toBe(18);
+  });
+
+  it('fails the call with request_limit when retries against a failing Datatracker cut every admitted id', async () => {
+    const s = boot();
+    const failing = () => statusResponse(503);
+    for (const name of DRAFTS) serveDraft(s, name, { outgoing: failing, incoming: failing });
     const out = await call({ ids: DRAFTS });
     expect(out.isError).toBe(true);
     expect(out.structured.error).toMatchObject({
