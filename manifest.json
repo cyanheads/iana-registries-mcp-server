@@ -1,11 +1,35 @@
 {
   "manifest_version": "0.3",
   "name": "iana-registries-mcp-server",
+  "display_name": "iana-registries-mcp-server",
   "version": "0.1.0",
-  "description": "IANA protocol registries and IETF Datatracker lookups: ports, media types, HTTP status codes and headers, URI schemes, PENs, language subtags, and RFC status.",
+  "description": "Look up IANA ports, media types, HTTP status codes and fields, URI schemes, enterprise numbers, and BCP 47 language tags; check RFC status; search and read any IANA registry.",
   "author": { "name": "cyanheads" },
-  "license": "Apache-2.0",
   "repository": { "type": "git", "url": "https://github.com/cyanheads/iana-registries-mcp-server" },
+  "homepage": "https://github.com/cyanheads/iana-registries-mcp-server#readme",
+  "license": "Apache-2.0",
+  "keywords": [
+    "mcp",
+    "mcp-server",
+    "model-context-protocol",
+    "typescript",
+    "iana",
+    "ietf",
+    "rfc",
+    "rfc-editor",
+    "datatracker",
+    "protocol-registries",
+    "port-numbers",
+    "media-types",
+    "mime-types",
+    "http-status-codes",
+    "http-fields",
+    "uri-schemes",
+    "private-enterprise-numbers",
+    "oid",
+    "bcp47",
+    "language-tags"
+  ],
   "server": {
     "type": "node",
     "entry_point": "dist/index.js",
@@ -23,6 +47,6 @@
     "runtimes": { "node": ">=24.0.0" }
   },
   "tools_generated": true,
-  "prompts_generated": true,
+  "prompts_generated": false,
   "user_config": {}
 }

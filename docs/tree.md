@@ -1,6 +1,6 @@
 # iana-registries-mcp-server - Directory Structure
 
-Generated on: 2026-10-01 14:22:13
+Generated on: 2026-10-01 16:17:54
 
 ```text
 iana-registries-mcp-server/
@@ -24,6 +24,7 @@ iana-registries-mcp-server/
 │   ├── extensions.json
 │   └── settings.json
 ├── changelog/
+│   ├── 0.1.x/
 │   └── template.md
 ├── docs/
 │   └── design.md
@@ -210,8 +211,10 @@ iana-registries-mcp-server/
 │   │   ├── tool-harness.ts
 │   │   └── upstream-harness.ts
 │   └── tools/
+│       ├── format-blockquotes.test.ts
 │       ├── get-registry-records.test.ts
 │       ├── get-rfc-status.test.ts
+│       ├── list-enrichment.test.ts
 │       ├── lookup-http-field.test.ts
 │       ├── lookup-http-status.test.ts
 │       ├── lookup-language-tag.test.ts
@@ -231,12 +234,14 @@ iana-registries-mcp-server/
 ├── biome.json
 ├── bun.lock
 ├── bunfig.toml
+├── CHANGELOG.md
 ├── CLAUDE.md
 ├── devcheck.config.json
 ├── Dockerfile
 ├── LICENSE
 ├── manifest.json
 ├── package.json
+├── README.md
 ├── server.json
 ├── tsconfig.build.json
 ├── tsconfig.json
