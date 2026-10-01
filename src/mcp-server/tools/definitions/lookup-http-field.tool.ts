@@ -16,6 +16,7 @@ import { startCallBudget } from '@/services/upstream/call-budget.js';
 import {
   discloseList,
   echo,
+  exactFirst,
   offsetIgnored,
   offsetListEnrichment,
   offsetPage,
@@ -182,10 +183,7 @@ export const lookupHttpField = tool('iana_lookup_http_field', {
       .filter((record) => matchesQuery(toSearchText(record.value, record.fields.comments), query))
       .map(toField)
       .filter(withStatus);
-    const ranked = [
-      ...matches.filter((field) => field.name.toLowerCase() === wanted),
-      ...matches.filter((field) => field.name.toLowerCase() !== wanted),
-    ];
+    const ranked = exactFirst(matches, (field) => field.name.toLowerCase() === wanted);
     const page = offsetPage(ranked, {
       offset: input.offset,
       limit: input.limit,

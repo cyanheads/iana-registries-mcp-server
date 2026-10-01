@@ -28,6 +28,8 @@ type XNode = Record<string, unknown>;
 const ATTRS = ':@';
 const TEXT = '#text';
 
+const ASSIGNMENTS = 'https://www.iana.org/assignments/';
+
 /** Elements that hold person data; skipped wherever they appear. */
 const DROPPED = new Set(['people', 'expert', 'assignee', 'contact']);
 
@@ -169,7 +171,7 @@ export function parseReference(
         ref = {
           type: 'registry',
           id: data,
-          url: `https://www.iana.org/assignments/${encodeURIComponent(data)}`,
+          url: `${ASSIGNMENTS}${encodeURIComponent(data)}`,
         };
       break;
     case 'uri':
@@ -292,8 +294,6 @@ function parseRecord(node: XNode, columns: Set<string>): RegistryRecord {
     ...(updated ? { updated } : {}),
   };
 }
-
-const ASSIGNMENTS = 'https://www.iana.org/assignments/';
 
 const encodePath = (path: string) => path.split('/').map(encodeURIComponent).join('/');
 

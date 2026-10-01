@@ -3,8 +3,9 @@
  * the end-of-handler write that discloses counts, truncation, and the call's one
  * composed notice. `ctx.enrich.truncated()` also writes `notice` and the last
  * write wins, so a handler collects its notice fragments and writes them once,
- * here. List modes page by `offset`: {@link offsetPage} cuts the page and words
- * its notice, and {@link discloseList} writes its `next_offset`.
+ * here. List modes rank exact matches first ({@link exactFirst}) and page by
+ * `offset`: {@link offsetPage} cuts the page and words its notice, and
+ * {@link discloseList} writes its `next_offset`.
  * @module mcp-server/tools/shared/list-enrichment
  */
 
@@ -72,6 +73,14 @@ export function discloseList(enrich: ListEnrich, page: ListPage): void {
   }
   enrich({ shown: page.shown });
   if (notice) enrich.notice(notice);
+}
+
+/** The matches `isExact` accepts, then the rest, each group in its original order. */
+export function exactFirst<T>(matches: readonly T[], isExact: (match: T) => boolean): T[] {
+  const exact: T[] = [];
+  const rest: T[] = [];
+  for (const match of matches) (isExact(match) ? exact : rest).push(match);
+  return [...exact, ...rest];
 }
 
 /** Where a list mode's page starts, how long it may be, and how its notice reads. */

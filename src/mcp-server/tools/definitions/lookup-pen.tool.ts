@@ -15,6 +15,7 @@ import { startCallBudget } from '@/services/upstream/call-budget.js';
 import {
   discloseList,
   echo,
+  exactFirst,
   offsetIgnored,
   offsetListEnrichment,
   offsetPage,
@@ -182,9 +183,11 @@ export const lookupPen = tool('iana_lookup_pen', {
     const matches = model.entries.filter(
       (entry) => entry.state === 'assigned' && matchesQuery(entry.searchText, query),
     );
-    const isExact = (entry: PenEntry) =>
-      entry.organization !== undefined && normalizeForSearch(entry.organization) === wanted;
-    const ranked = [...matches.filter(isExact), ...matches.filter((entry) => !isExact(entry))];
+    const ranked = exactFirst(
+      matches,
+      (entry) =>
+        entry.organization !== undefined && normalizeForSearch(entry.organization) === wanted,
+    );
     const page = offsetPage(ranked, {
       offset: input.offset,
       limit: input.limit,

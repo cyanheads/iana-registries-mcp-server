@@ -26,6 +26,10 @@ const TYPES: ReadonlySet<string> = new Set<LanguageSubtagType>([
   'redundant',
 ]);
 
+function isSubtagType(type: string | undefined): type is LanguageSubtagType {
+  return type !== undefined && TYPES.has(type);
+}
+
 /** Splits one record's lines into `[key, value]` pairs, folding continuation lines. */
 function fieldsOf(lines: readonly string[]): [string, string][] {
   const fields: [string, string][] = [];
@@ -53,7 +57,7 @@ function toRecord(fields: readonly [string, string][]): LanguageRecord | undefin
     else if (!single.has(key)) single.set(key, value);
   }
   const type = single.get('Type');
-  if (!type || !TYPES.has(type)) return;
+  if (!isSubtagType(type)) return;
 
   const optional = (key: string) => single.get(key) || undefined;
   const subtag = optional('Subtag');
@@ -65,7 +69,7 @@ function toRecord(fields: readonly [string, string][]): LanguageRecord | undefin
   const macrolanguage = optional('Macrolanguage');
   const scope = optional('Scope');
   return {
-    type: type as LanguageSubtagType,
+    type,
     descriptions,
     prefixes,
     comments,

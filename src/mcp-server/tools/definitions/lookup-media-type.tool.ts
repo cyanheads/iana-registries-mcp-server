@@ -28,6 +28,7 @@ import { startCallBudget } from '@/services/upstream/call-budget.js';
 import {
   discloseList,
   echo,
+  exactFirst,
   offsetIgnored,
   offsetListEnrichment,
   offsetPage,
@@ -330,10 +331,12 @@ export const lookupMediaType = tool('iana_lookup_media_type', {
         (topLevel === undefined || mediaType.top_level === topLevel) &&
         matchesQuery(toSearchText(mediaType.type, mediaType.status_note), query),
     );
-    const isExact = (mediaType: (typeof matches)[number]) =>
-      normalizeForSearch(mediaType.type) === wanted ||
-      normalizeForSearch(mediaType.subtype) === wanted;
-    const ranked = [...matches.filter(isExact), ...matches.filter((m) => !isExact(m))];
+    const ranked = exactFirst(
+      matches,
+      (mediaType) =>
+        normalizeForSearch(mediaType.type) === wanted ||
+        normalizeForSearch(mediaType.subtype) === wanted,
+    );
     const page = offsetPage(ranked, {
       offset: input.offset,
       limit: input.limit,

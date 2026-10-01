@@ -16,6 +16,7 @@ import { startCallBudget } from '@/services/upstream/call-budget.js';
 import {
   discloseList,
   echo,
+  exactFirst,
   offsetIgnored,
   offsetListEnrichment,
   offsetPage,
@@ -349,9 +350,9 @@ export const lookupLanguageTag = tool('iana_lookup_language_tag', {
         (input.subtag_type === undefined || record.type === input.subtag_type) &&
         matchesQuery(record.searchText, query),
     );
-    const isExact = (record: LanguageRecord) =>
-      record.descriptions.some((text) => normalizeForSearch(text) === wanted);
-    const ranked = [...hits.filter(isExact), ...hits.filter((record) => !isExact(record))];
+    const ranked = exactFirst(hits, (record) =>
+      record.descriptions.some((text) => normalizeForSearch(text) === wanted),
+    );
     const page = offsetPage(ranked, {
       offset: input.offset,
       limit: input.limit,

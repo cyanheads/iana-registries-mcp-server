@@ -21,6 +21,7 @@ import { upstreamUnreadable } from '@/services/upstream/upstream-client.js';
 import {
   discloseList,
   echo,
+  exactFirst,
   offsetIgnored,
   offsetListEnrichment,
   offsetPage,
@@ -242,10 +243,7 @@ export const lookupHttpStatus = tool('iana_lookup_http_status', {
           matchesQuery(toSearchText(record.fields.description), query),
       )
       .map((record) => toStatus(record, loaded.source.url));
-    const ranked = [
-      ...matches.filter((status) => normalizeForSearch(status.phrase) === wanted),
-      ...matches.filter((status) => normalizeForSearch(status.phrase) !== wanted),
-    ];
+    const ranked = exactFirst(matches, (status) => normalizeForSearch(status.phrase) === wanted);
     const page = offsetPage(ranked, {
       offset: input.offset,
       limit: input.limit,

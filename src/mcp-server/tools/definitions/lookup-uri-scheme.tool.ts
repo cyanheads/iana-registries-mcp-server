@@ -16,6 +16,7 @@ import { startCallBudget } from '@/services/upstream/call-budget.js';
 import {
   discloseList,
   echo,
+  exactFirst,
   offsetIgnored,
   offsetListEnrichment,
   offsetPage,
@@ -212,10 +213,7 @@ export const lookupUriScheme = tool('iana_lookup_uri_scheme', {
           withStatus(scheme) &&
           matchesQuery(toSearchText(scheme.scheme, scheme.description), query),
       );
-    const ranked = [
-      ...matches.filter((scheme) => scheme.scheme.toLowerCase() === wanted),
-      ...matches.filter((scheme) => scheme.scheme.toLowerCase() !== wanted),
-    ];
+    const ranked = exactFirst(matches, (scheme) => scheme.scheme.toLowerCase() === wanted);
     const page = offsetPage(ranked, {
       offset: input.offset,
       limit: input.limit,

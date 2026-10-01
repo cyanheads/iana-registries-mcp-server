@@ -43,8 +43,8 @@ export function createCallBudget({ context, signal, totalMs }: CallBudgetOptions
 }
 
 /** Starts the 45 s budget for one tool call. Call it first thing in the handler. */
-export function startCallBudget(ctx: Context, totalMs = CALL_BUDGET_MS): CallBudget {
-  return createCallBudget({ context: ctx, signal: ctx.signal, totalMs });
+export function startCallBudget(ctx: Context): CallBudget {
+  return createCallBudget({ context: ctx, signal: ctx.signal, totalMs: CALL_BUDGET_MS });
 }
 
 /** The `Timeout` a call gets when its budget runs out outside a retry ladder. */

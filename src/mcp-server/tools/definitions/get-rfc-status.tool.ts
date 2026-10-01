@@ -435,11 +435,9 @@ export const getRfcStatus = tool('iana_get_rfc_status', {
         if (outcome.resolved.trackingUnavailable) trackingUnavailable.push(outcome.requested.id);
         continue;
       }
-      ctx.log.warning('Document status lookup failed', {
-        id: outcome.requested.id,
-        error: errorMessage(outcome.error),
-      });
-      failed.push({ id: outcome.requested.id, error: errorMessage(outcome.error) });
+      const failure = { id: outcome.requested.id, error: errorMessage(outcome.error) };
+      ctx.log.warning('Document status lookup failed', failure);
+      failed.push(failure);
     }
 
     const firstFailure = outcomes.find((outcome) => 'error' in outcome);
