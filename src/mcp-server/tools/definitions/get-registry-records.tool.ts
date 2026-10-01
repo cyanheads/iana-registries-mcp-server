@@ -609,7 +609,7 @@ export const getRegistryRecords = tool('iana_get_registry_records', {
         more &&
           (budgetCut
             ? `This page stopped at the ${RECORDS_BUDGET.toLocaleString('en-US')}-character output budget after ${records.length} records; ${remaining} more match. Pass next_cursor as cursor to continue.`
-            : `${remaining} more records match; pass next_cursor as cursor to continue, or raise limit (max 100).`),
+            : `${remaining} more records match; pass next_cursor as cursor to continue${input.limit < 100 ? ', or raise limit (max 100)' : ''}.`),
       ],
     });
 

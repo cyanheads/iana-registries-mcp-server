@@ -758,6 +758,18 @@ describe('iana_get_registry_records: cursor', () => {
     expect(out.text).toContain(`**Next cursor:** \`${String(out.structured.next_cursor)}\``);
   });
 
+  it('drops "raise limit" from the cut notice once limit is at its maximum', async () => {
+    boot('long-registry', registryXml({ id: 'long-registry', body: numberedRecords(130) }));
+    const out = await call({ registry: 'long-registry', limit: 100 });
+    expect(out.structured).toMatchObject({
+      totalCount: 130,
+      shown: 100,
+      cap: 100,
+      truncated: true,
+      notice: '30 more records match; pass next_cursor as cursor to continue.',
+    });
+  });
+
   it('serves the notes and ranges on the first page only', async () => {
     boot();
     const first = await alpha({ limit: 3 });
