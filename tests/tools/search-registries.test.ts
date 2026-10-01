@@ -87,7 +87,7 @@ describe('iana_search_registries: matching', () => {
       },
       totalCount: 1,
       shown: 1,
-      cap: 20,
+      cap: 15,
       truncated: false,
     });
     expect(out.structured.source).not.toHaveProperty('registry_updated');
@@ -185,16 +185,16 @@ describe('iana_search_registries: limit and miss', () => {
     expect(out.text).toContain('**next_offset:** 3');
   });
 
-  it('applies the default cap of 20, a digit-string limit, and the maximum of 50', async () => {
+  it('applies the default cap of 15, a digit-string limit, and the maximum of 50', async () => {
     boot();
-    expect((await call({ query: 'cipher' })).structured).toMatchObject({ cap: 20 });
+    expect((await call({ query: 'cipher' })).structured).toMatchObject({ cap: 15 });
     expect((await call({ query: 'cipher', limit: '5' })).structured).toMatchObject({ cap: 5 });
     expect((await call({ query: 'cipher', limit: 50 })).structured).toMatchObject({ cap: 50 });
   });
 
   it('reads a blank limit as unset', async () => {
     boot();
-    expect((await call({ query: 'cipher', limit: '  ' })).structured).toMatchObject({ cap: 20 });
+    expect((await call({ query: 'cipher', limit: '  ' })).structured).toMatchObject({ cap: 15 });
   });
 
   it('explains a miss and points at the curated tools', async () => {
@@ -342,7 +342,7 @@ describe('iana_search_registries: list-enrichment contract', () => {
       registries: [],
       totalCount: 0,
       shown: 0,
-      cap: 20,
+      cap: 15,
       truncated: false,
     });
     expect(out.text).toContain('0 total');

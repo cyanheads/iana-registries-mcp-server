@@ -262,33 +262,29 @@ export const getRegistryRecords = tool('iana_get_registry_records', {
     registration_procedure: z
       .string()
       .optional()
-      .describe(
-        'Registration rule of the table read (or of the registry, when listing sub-registries).',
-      ),
+      .describe('Registration rule of the table read, or of the registry when listing.'),
     description: z
       .string()
       .optional()
       .describe(
-        'Description of the table read (or of the registry, when listing sub-registries). A registry with no records, such as a YANG module registry, can name its module file here.',
+        'Description of the table read, or of the registry when listing; a YANG module registry names its module file here.',
       ),
     references: z
       .array(ReferenceSchema)
       .optional()
-      .describe(
-        'References of the table read: the documents that define this sub-registry, which the parent registry may not cite.',
-      ),
+      .describe('The documents that define the table read.'),
     registration_ranges: z
       .array(
         z
           .object({
             range: z.string().describe('Allocation range, e.g. "0x0000-0xBFFF".'),
-            procedure: z.string().optional().describe('Registration procedure for the range.'),
+            procedure: z.string().optional().describe('Registration procedure.'),
             note: z.string().optional().describe('Note on the range.'),
           })
           .describe('One allocation range.'),
       )
       .optional()
-      .describe('Allocation ranges and their procedures, when the table defines them.'),
+      .describe('Allocation ranges, when the table defines them.'),
     notes: z
       .array(
         z
@@ -299,15 +295,13 @@ export const getRegistryRecords = tool('iana_get_registry_records', {
           })
           .describe('One registry note.'),
       )
-      .describe('Notes of the table read, first page only, up to 4,000 characters in total.'),
+      .describe('Notes of the table read, first page only, 4,000 characters at most.'),
     notes_truncated: z
       .boolean()
       .optional()
-      .describe('True when notes were cut at the 4,000-character budget.'),
-    columns: z
-      .array(z.string())
-      .describe('Field (XML element) names seen in the table, first-seen order.'),
-    value_field: z.string().optional().describe('The key column the value filter matches against.'),
+      .describe('True when notes were cut at 4,000 characters.'),
+    columns: z.array(z.string()).describe('Field (XML element) names seen, first-seen order.'),
+    value_field: z.string().optional().describe('The key column the value filter matches.'),
     records: z
       .array(
         z
@@ -315,27 +309,25 @@ export const getRegistryRecords = tool('iana_get_registry_records', {
             value: z.string().optional().describe('The record key (value_field column).'),
             fields: z
               .record(z.string(), z.string())
-              .describe('Field values keyed by XML element name, each capped at 2,000 characters.'),
+              .describe('Values keyed by XML element name, each capped at 2,000 characters.'),
             references: z.array(ReferenceSchema).describe('References on the record.'),
-            registered: z.string().optional().describe('Registration date, when recorded.'),
-            updated: z.string().optional().describe('Last-updated date, when recorded.'),
+            registered: z.string().optional().describe('Registration date.'),
+            updated: z.string().optional().describe('Last-updated date.'),
             cut_fields: z
               .array(z.string())
               .optional()
-              .describe(
-                'Fields cut at 2,000 characters (ending in …) or dropped past the 16-field cap.',
-              ),
+              .describe('Fields cut at 2,000 characters (ending in …) or past the 16-field cap.'),
           })
           .describe('One registry record.'),
       )
-      .describe('Records in registry order, up to limit and the 48,000-character page budget.'),
+      .describe('Records in registry order, up to limit and a 48,000-character page budget.'),
     subregistries: z
       .array(
         z
           .object({
-            id: z.string().describe('Sub-registry id to pass as subregistry.'),
+            id: z.string().describe('Pass as subregistry.'),
             title: z.string().describe('Sub-registry title.'),
-            record_count: z.number().describe('Records in the sub-registry.'),
+            record_count: z.number().describe('Records it holds.'),
           })
           .describe('One sub-registry.'),
       )
@@ -344,7 +336,7 @@ export const getRegistryRecords = tool('iana_get_registry_records', {
     next_cursor: z
       .string()
       .optional()
-      .describe('Pass as cursor, with the same filters, to read the next page.'),
+      .describe('Pass as cursor, with the same filters, for the next page.'),
     source: SourceSchema,
   }),
   enrichment: listEnrichment,

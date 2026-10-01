@@ -67,9 +67,7 @@ export const lookupPen = tool('iana_lookup_pen', {
   }),
   output: z.object({
     mode: z.enum(['pen', 'organization']).describe('Which lookup ran.'),
-    found: z
-      .boolean()
-      .describe('True when at least one returned number is assigned to an organization.'),
+    found: z.boolean().describe('True when a returned number is assigned to an organization.'),
     requested_oid: z
       .string()
       .optional()
@@ -77,9 +75,7 @@ export const lookupPen = tool('iana_lookup_pen', {
     sub_arcs: z
       .string()
       .optional()
-      .describe(
-        'The arcs below the enterprise number in the requested OID, e.g. "1.2". The enterprise assigns these, not IANA.',
-      ),
+      .describe('Arcs below the enterprise number, e.g. "1.2"; the enterprise assigns these.'),
     enterprises: z
       .array(
         z
@@ -88,20 +84,16 @@ export const lookupPen = tool('iana_lookup_pen', {
             organization: z
               .string()
               .optional()
-              .describe(
-                'Organization line, verbatim. Absent when withheld or missing from the registry.',
-              ),
+              .describe('Organization line; absent when withheld or missing.'),
             organization_withheld: z
               .boolean()
               .optional()
-              .describe(
-                'True when the registry entry mixes contact details into the organization line, which is withheld.',
-              ),
+              .describe('True when the line mixes in contact details and is withheld.'),
             oid: z.string().describe('The enterprise OID prefix, e.g. "1.3.6.1.4.1.32473".'),
             state: z
               .enum(['assigned', 'reserved', 'unassigned'])
               .describe(
-                'reserved when the organization is "Reserved"; unassigned for "Unassigned" or "---none---"; else assigned.',
+                'reserved ("Reserved"), unassigned ("Unassigned" or "---none---"), else assigned.',
               ),
           })
           .describe('One enterprise number entry.'),

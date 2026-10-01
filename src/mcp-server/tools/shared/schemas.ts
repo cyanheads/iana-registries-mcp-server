@@ -70,24 +70,18 @@ export function offsetInput(mode?: string) {
 /** Provenance every registry-backed output carries. */
 export const SourceSchema = z
   .object({
-    registry_id: z
-      .string()
-      .describe('Id of the registry file that answered, e.g. "http-status-codes" or "protocols".'),
+    registry_id: z.string().describe('Id of the registry file that answered.'),
     url: z.string().describe('The file fetched from iana.org.'),
     registry_updated: z
       .string()
       .optional()
-      .describe("The registry's own last-updated date. Absent for the protocol index page."),
-    fetched_at: z
-      .string()
-      .describe('ISO 8601 time of the last successful fetch or revalidation of the file.'),
+      .describe("The registry's own last-updated date; absent for the protocol index."),
+    fetched_at: z.string().describe('ISO 8601 time of the last successful fetch or revalidation.'),
     stale: z
       .boolean()
-      .describe(
-        'True only when a refresh failed and a cached copy up to 7 days old answered instead.',
-      ),
+      .describe('True when a refresh failed and a cached copy up to 7 days old answered.'),
   })
-  .describe('Where the answer came from and how current it is.');
+  .describe('Provenance and freshness of the answer.');
 
 /** One normalized registry reference. */
 export const ReferenceSchema = z
@@ -95,14 +89,9 @@ export const ReferenceSchema = z
     type: z
       .enum(['rfc', 'draft', 'uri', 'registry', 'rfc-errata', 'note', 'text'])
       .describe('Reference kind.'),
-    id: z
-      .string()
-      .describe('Reference id: "RFC 9110", a draft name, a registry id, a URL, or a note anchor.'),
-    section: z.string().optional().describe('Section of the referenced document, e.g. "15.5.5".'),
-    label: z
-      .string()
-      .optional()
-      .describe("The registry's label text, when it says more than the id and section."),
-    url: z.string().optional().describe('Resolvable URL for the reference.'),
+    id: z.string().describe('E.g. "RFC 9110", a draft name, a registry id, or a URL.'),
+    section: z.string().optional().describe('Section, e.g. "15.5.5".'),
+    label: z.string().optional().describe('Label text, when it adds to id and section.'),
+    url: z.string().optional().describe('URL of the reference.'),
   })
   .describe('A defining reference.');

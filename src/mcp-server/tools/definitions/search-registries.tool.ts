@@ -39,7 +39,7 @@ export const searchRegistries = tool('iana_search_registries', {
       .describe(
         'Words matched as whole tokens against registry titles, categories, and ids, e.g. "tls cipher". An exact registry or sub-registry id ranks first.',
       ),
-    limit: limitInput(50, 20),
+    limit: limitInput(50, 15),
     offset: offsetInput(),
   }),
   output: z.object({
@@ -47,26 +47,24 @@ export const searchRegistries = tool('iana_search_registries', {
       .array(
         z
           .object({
-            registry_id: z
-              .string()
-              .describe('Registry id to pass as registry to iana_get_registry_records.'),
+            registry_id: z.string().describe('Pass as registry to iana_get_registry_records.'),
             subregistry_id: z
               .string()
               .optional()
-              .describe('Sub-registry id to pass as subregistry to iana_get_registry_records.'),
+              .describe('Pass as subregistry to iana_get_registry_records.'),
             title: z.string().describe('Registry or sub-registry title.'),
-            category: z.string().describe('Protocol category the index lists the entry under.'),
+            category: z.string().describe('Protocol category in the index.'),
             registration_procedure: z
               .string()
               .optional()
-              .describe('Registration procedure from the index, e.g. "IETF Review".'),
+              .describe('Registration procedure, e.g. "IETF Review".'),
             defining_documents: z
               .array(
                 z
                   .object({
                     id: z.string().describe('Document id, e.g. "RFC8446".'),
                     title: z.string().optional().describe('Document title.'),
-                    url: z.string().optional().describe('Link to the document via iana.org.'),
+                    url: z.string().optional().describe('Link via iana.org.'),
                   })
                   .describe('A defining document.'),
               )
@@ -74,7 +72,7 @@ export const searchRegistries = tool('iana_search_registries', {
             page_url: z.string().describe('The registry page on iana.org.'),
             xml_url: z.string().describe('The registry XML file.'),
           })
-          .describe('One registry or sub-registry index entry.'),
+          .describe('One index entry.'),
       )
       .describe('Matching index entries: exact id hits first, then index order.'),
     source: SourceSchema,

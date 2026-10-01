@@ -82,7 +82,7 @@ export const lookupHttpField = tool('iana_lookup_http_field', {
   }),
   output: z.object({
     mode: z.enum(['name', 'keyword']).describe('Which lookup ran.'),
-    found: z.boolean().describe('True when at least one registered field matched.'),
+    found: z.boolean().describe('True when a registered field matched.'),
     fields: z
       .array(
         z
@@ -91,20 +91,15 @@ export const lookupHttpField = tool('iana_lookup_http_field', {
             status: z
               .string()
               .optional()
-              .describe(
-                'Registration status, lowercased: permanent, provisional, deprecated, or obsoleted.',
-              ),
+              .describe('Lowercased: permanent, provisional, deprecated, or obsoleted.'),
             structured_type: z
               .string()
               .optional()
-              .describe('Structured Field type (List, Dictionary, Item) when registered.'),
-            comments: z.string().optional().describe('Registry comments, verbatim.'),
+              .describe('Structured Field type (List, Dictionary, Item), when registered.'),
+            comments: z.string().optional().describe('Registry comments.'),
             references: z.array(ReferenceSchema).describe('Defining references.'),
-            registered: z.string().optional().describe('Registration date, when recorded.'),
-            updated: z
-              .string()
-              .optional()
-              .describe('Last-updated date of the entry, when recorded.'),
+            registered: z.string().optional().describe('Registration date.'),
+            updated: z.string().optional().describe('Last-updated date.'),
           })
           .describe('One registered HTTP field.'),
       )

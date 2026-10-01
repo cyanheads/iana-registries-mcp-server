@@ -117,7 +117,7 @@ export const lookupHttpStatus = tool('iana_lookup_http_status', {
   }),
   output: z.object({
     mode: z.enum(['code', 'keyword']).describe('Which lookup ran.'),
-    found: z.boolean().describe('True when at least one registered status matched.'),
+    found: z.boolean().describe('True when a registered status matched.'),
     statuses: z
       .array(
         z
@@ -125,26 +125,16 @@ export const lookupHttpStatus = tool('iana_lookup_http_status', {
             code: z.number().describe('The status code.'),
             phrase: z
               .string()
-              .describe(
-                'The registered description verbatim, including markers such as "(Unused)".',
-              ),
+              .describe('The registered description, with markers such as "(Unused)".'),
             class: z
               .enum(['informational', 'success', 'redirection', 'client_error', 'server_error'])
               .describe('Status class from the first digit.'),
             state: z
               .enum(['assigned', 'temporary', 'obsoleted', 'unused'])
-              .describe(
-                'From the registry markers: "(Unused)" → unused, "(OBSOLETED)" → obsoleted, "(TEMPORARY - …)" → temporary, else assigned.',
-              ),
+              .describe('From the registry markers (Unused), (OBSOLETED), (TEMPORARY - …).'),
             references: z.array(ReferenceSchema).describe('Defining references.'),
-            registered: z
-              .string()
-              .optional()
-              .describe('Registration date, when the registry records one.'),
-            updated: z
-              .string()
-              .optional()
-              .describe('Last-updated date of the entry, when recorded.'),
+            registered: z.string().optional().describe('Registration date.'),
+            updated: z.string().optional().describe('Last-updated date.'),
           })
           .describe('One registered status code.'),
       )
@@ -152,7 +142,7 @@ export const lookupHttpStatus = tool('iana_lookup_http_status', {
     unassigned_range: z
       .string()
       .optional()
-      .describe('For an unassigned code, the registry row it falls in, e.g. "432-450".'),
+      .describe('For an unassigned code, the registry range it falls in, e.g. "432-450".'),
     source: SourceSchema,
   }),
   enrichment: offsetListEnrichment,

@@ -17,14 +17,11 @@ import { type EnrichHelpers, z } from '@cyanheads/mcp-ts-core';
  * as its first statement so every path parses, then calls {@link discloseList}.
  */
 export const listEnrichment = {
-  totalCount: z.number().describe('Number of matches before the limit was applied.'),
-  shown: z.number().describe('Number of results returned in this response.'),
-  cap: z.number().describe('The limit that was applied.'),
-  truncated: z.boolean().describe('True when more matches exist than this response returned.'),
-  notice: z
-    .string()
-    .optional()
-    .describe('Guidance for a miss, a cut list, or a condition worth knowing about this result.'),
+  totalCount: z.number().describe('Matches before the limit was applied.'),
+  shown: z.number().describe('Results returned.'),
+  cap: z.number().describe('The limit applied.'),
+  truncated: z.boolean().describe('True when more matches exist than were returned.'),
+  notice: z.string().optional().describe('Guidance on a miss, a cut list, or another condition.'),
 };
 
 /** {@link listEnrichment} plus the `next_offset` of a tool whose list modes page by `offset`. */
@@ -33,9 +30,7 @@ export const offsetListEnrichment = {
   next_offset: z
     .number()
     .optional()
-    .describe(
-      'Pass as offset to get the next page of matches. Absent when no match remains past this page.',
-    ),
+    .describe('Pass as offset for the next page; absent on the last.'),
 };
 
 /** `ctx.enrich` of a tool declaring {@link listEnrichment} or {@link offsetListEnrichment}. */

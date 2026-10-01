@@ -98,7 +98,7 @@ export const lookupUriScheme = tool('iana_lookup_uri_scheme', {
   }),
   output: z.object({
     mode: z.enum(['scheme', 'keyword']).describe('Which lookup ran.'),
-    found: z.boolean().describe('True when at least one registered scheme matched.'),
+    found: z.boolean().describe('True when a registered scheme matched.'),
     schemes: z
       .array(
         z
@@ -107,29 +107,24 @@ export const lookupUriScheme = tool('iana_lookup_uri_scheme', {
             status: z
               .string()
               .optional()
-              .describe('Registration status, lowercased: permanent, provisional, or historical.'),
+              .describe('Lowercased: permanent, provisional, or historical.'),
             status_note: z
               .string()
               .optional()
-              .describe('Annotation the registry attaches to the name, e.g. "OBSOLETE".'),
-            description: z.string().optional().describe('Registry description, verbatim.'),
+              .describe('Annotation on the registered name, e.g. "OBSOLETE".'),
+            description: z.string().optional().describe('Registry description.'),
             well_known_uri_support: z
               .string()
               .optional()
-              .describe('Reference defining well-known URI support for the scheme, when any.'),
-            notes: z.string().optional().describe('Registry notes, verbatim, when present.'),
+              .describe('Reference defining well-known URI support, when any.'),
+            notes: z.string().optional().describe('Registry notes.'),
             template_url: z
               .string()
               .optional()
-              .describe(
-                'URL of the scheme registration template on iana.org, when one is published.',
-              ),
+              .describe('Registration template URL, when published.'),
             references: z.array(ReferenceSchema).describe('Defining references.'),
-            registered: z.string().optional().describe('Registration date, when recorded.'),
-            updated: z
-              .string()
-              .optional()
-              .describe('Last-updated date of the entry, when recorded.'),
+            registered: z.string().optional().describe('Registration date.'),
+            updated: z.string().optional().describe('Last-updated date.'),
           })
           .describe('One registered URI scheme.'),
       )

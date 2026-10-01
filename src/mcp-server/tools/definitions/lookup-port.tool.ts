@@ -160,18 +160,14 @@ export const lookupPort = tool('iana_lookup_port', {
   }),
   output: z.object({
     mode: z.enum(['port', 'service', 'keyword']).describe('Which lookup ran.'),
-    found: z
-      .boolean()
-      .describe('True when at least one returned row carries a registered service name.'),
+    found: z.boolean().describe('True when a returned row has a registered service name.'),
     port_class: z
       .object({
-        name: z
-          .enum(['system', 'user', 'dynamic'])
-          .describe('RFC 6335 class: system, user, or dynamic (Dynamic/Private).'),
+        name: z.enum(['system', 'user', 'dynamic']).describe('RFC 6335 port class.'),
         range: z.string().describe('The class range, e.g. "0-1023".'),
       })
       .optional()
-      .describe('The class of the requested port. Port mode only.'),
+      .describe("Port mode: the requested port's class."),
     assignments: z
       .array(
         z
@@ -179,38 +175,32 @@ export const lookupPort = tool('iana_lookup_port', {
             service_name: z
               .string()
               .optional()
-              .describe('Registered service name. Absent on range rows and unnamed rows.'),
+              .describe('Registered service name; absent on range and unnamed rows.'),
             port: z.number().optional().describe('Port number of a single-port row.'),
-            port_range: z
-              .string()
-              .optional()
-              .describe('Port range of a range row, e.g. "1002-1007".'),
+            port_range: z.string().optional().describe('Range of a range row, e.g. "1002-1007".'),
             transport: z
               .string()
               .optional()
-              .describe('Transport protocol: tcp, udp, sctp, or dccp. Absent on range rows.'),
+              .describe('tcp, udp, sctp, or dccp; usually absent on range rows.'),
             state: z
               .enum(['assigned', 'reserved', 'unassigned', 'unnamed'])
               .describe(
-                'assigned when a service name is present; reserved or unassigned when the description is exactly that word; else unnamed (e.g. "De-registered").',
+                'assigned (service name present), reserved or unassigned (the description is that word), else unnamed (e.g. "De-registered").',
               ),
-            description: z
-              .string()
-              .optional()
-              .describe('Registry description, verbatim. Absent when the row has none.'),
-            notes: z.string().optional().describe('Registry note on the row, verbatim.'),
+            description: z.string().optional().describe('Registry description.'),
+            notes: z.string().optional().describe('Registry note.'),
             unauthorized_use: z
               .string()
               .optional()
-              .describe('Known unauthorized use of the port, as the registry records it.'),
+              .describe('Known unauthorized use, as recorded.'),
             references: z.array(ReferenceSchema).describe('Defining references.'),
-            registered: z.string().optional().describe('Registration date, when recorded.'),
-            updated: z.string().optional().describe('Last-updated date of the row, when recorded.'),
+            registered: z.string().optional().describe('Registration date.'),
+            updated: z.string().optional().describe('Last-updated date.'),
           })
           .describe('One registry row.'),
       )
       .describe(
-        'Matching rows. Port mode: rows for the exact port (by service name, then transport), then range rows containing it. Service and keyword modes: ascending by port, rows without a port last.',
+        'Matching rows. Port mode: exact rows, then range rows containing the port. Other modes: ascending by port, port-less rows last.',
       ),
     source: SourceSchema,
   }),

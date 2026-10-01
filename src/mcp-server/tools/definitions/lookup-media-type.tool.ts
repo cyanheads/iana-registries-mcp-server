@@ -177,69 +177,52 @@ export const lookupMediaType = tool('iana_lookup_media_type', {
   }),
   output: z.object({
     mode: z.enum(['type', 'keyword']).describe('Which lookup ran.'),
-    found: z.boolean().describe('True when at least one registered media type matched.'),
+    found: z.boolean().describe('True when a registered media type matched.'),
     normalized_type: z
       .string()
       .optional()
-      .describe('The type as looked up, lowercased with parameters removed. Type mode only.'),
+      .describe('Type mode: the type looked up, lowercased, parameters removed.'),
     media_types: z
       .array(
         z
           .object({
-            type: z
-              .string()
-              .describe(
-                'The registered type/subtype, in registry casing, e.g. "application/json".',
-              ),
+            type: z.string().describe('type/subtype in registry casing, e.g. "application/json".'),
             top_level: z.string().describe('Top-level type, e.g. "application".'),
-            subtype: z.string().describe('Subtype, in registry casing, e.g. "json".'),
+            subtype: z.string().describe('Subtype, e.g. "json".'),
             status: z
               .enum(['current', 'deprecated', 'obsoleted'])
-              .describe(
-                'From the registry annotation: OBSOLETE/OBSOLETED → obsoleted, DEPRECATED → deprecated, else current.',
-              ),
+              .describe('From the registry annotation (OBSOLETE(D), DEPRECATED); else current.'),
             status_note: z
               .string()
               .optional()
-              .describe(
-                'The registry status annotation, e.g. "OBSOLETED in favor of text/javascript".',
-              ),
+              .describe('The status annotation, e.g. "OBSOLETED in favor of text/javascript".'),
             replaced_by: z
               .string()
               .optional()
-              .describe('The replacement type the annotation names, e.g. "text/javascript".'),
-            template_url: z.string().describe('URL of the registration template on iana.org.'),
+              .describe('The replacement type the annotation names.'),
+            template_url: z.string().describe('Registration template URL.'),
             references: z.array(ReferenceSchema).describe('Defining references.'),
-            registered: z.string().optional().describe('Registration date, when recorded.'),
-            updated: z
-              .string()
-              .optional()
-              .describe('Last-updated date of the entry, when recorded.'),
+            registered: z.string().optional().describe('Registration date.'),
+            updated: z.string().optional().describe('Last-updated date.'),
             template: z
               .object({
-                fetched: z
-                  .boolean()
-                  .describe('False when the registration template could not be read.'),
+                fetched: z.boolean().describe('False when the template could not be read.'),
                 file_extensions: z
                   .string()
                   .optional()
-                  .describe(
-                    'The template\'s "File extension(s)" statement, verbatim, e.g. ".json".',
-                  ),
+                  .describe('The "File extension(s)" statement as written, e.g. ".json".'),
                 intended_usage: z
                   .string()
                   .optional()
-                  .describe('The template\'s "Intended usage" statement, verbatim, e.g. "COMMON".'),
+                  .describe('The "Intended usage" statement, e.g. "COMMON".'),
                 deprecated_aliases: z
                   .string()
                   .optional()
-                  .describe(
-                    'The template\'s "Deprecated alias names for this type" statement, verbatim.',
-                  ),
+                  .describe('The "Deprecated alias names for this type" statement.'),
               })
               .optional()
               .describe(
-                'Statements read from the registration template. Type mode only; a statement is absent when the template lacks it.',
+                'Type mode: registration template statements; each absent when the template lacks it.',
               ),
           })
           .describe('One registered media type.'),

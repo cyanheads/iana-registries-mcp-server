@@ -45,42 +45,24 @@ const RECORD_TYPES = [
 
 /** Registry fields every returned record carries. */
 const recordFields = {
-  descriptions: z
-    .array(z.string().describe('One Description value, verbatim.'))
-    .describe('Description values of the registry record; empty when the subtag is unregistered.'),
-  added: z.string().optional().describe('Date the record was added, YYYY-MM-DD.'),
+  descriptions: z.array(z.string()).describe('Description values; empty when unregistered.'),
+  added: z.string().optional().describe('Date added, YYYY-MM-DD.'),
   deprecated: z
     .string()
     .optional()
-    .describe(
-      'Date the record was deprecated, YYYY-MM-DD. A deprecated subtag stays valid; use preferred_value when present.',
-    ),
-  preferred_value: z
-    .string()
-    .optional()
-    .describe('The registry Preferred-Value: the subtag or tag to use instead.'),
+    .describe('Date deprecated, YYYY-MM-DD; still valid, but prefer preferred_value.'),
+  preferred_value: z.string().optional().describe('The subtag or tag to use instead.'),
   suppress_script: z
     .string()
     .optional()
-    .describe('Script subtag that tags for this language normally omit, e.g. "Latn" for "en".'),
-  macrolanguage: z
-    .string()
-    .optional()
-    .describe('The macrolanguage that encompasses this language, e.g. "zh".'),
-  scope: z
-    .string()
-    .optional()
-    .describe('Scope of a language subtag: macrolanguage, collection, special, or private-use.'),
+    .describe('Script subtag this language normally omits, e.g. "Latn".'),
+  macrolanguage: z.string().optional().describe('Encompassing macrolanguage, e.g. "zh".'),
+  scope: z.string().optional().describe('macrolanguage, collection, special, or private-use.'),
   prefixes: z
-    .array(z.string().describe('One Prefix value, e.g. "sl-rozaj".'))
+    .array(z.string())
     .optional()
-    .describe(
-      'Prefix values: the tags this extended language or variant subtag is meant to follow.',
-    ),
-  comments: z
-    .array(z.string().describe('One Comments value, verbatim.'))
-    .optional()
-    .describe('Comments values of the registry record.'),
+    .describe('Prefix values: the tags this extlang or variant follows.'),
+  comments: z.array(z.string()).optional().describe('Comments values.'),
 };
 
 const TypedRecordSchema = z
@@ -88,12 +70,10 @@ const TypedRecordSchema = z
     type: z.enum(RECORD_TYPES).describe('The record Type.'),
     subtag: z
       .string()
-      .describe(
-        'The registered subtag, or the whole tag for a grandfathered or redundant record. A private-use range reads like "qaa..qtz".',
-      ),
+      .describe('Subtag; the whole tag for grandfathered/redundant; a range such as "qaa..qtz".'),
     ...recordFields,
   })
-  .describe('One Language Subtag Registry record.');
+  .describe('One registry record.');
 
 /** The wire shape of a registry record's fields. */
 function toRecordFields(record: LanguageRecord | undefined) {
@@ -183,20 +163,18 @@ export const lookupLanguageTag = tool('iana_lookup_language_tag', {
     well_formed: z
       .boolean()
       .optional()
-      .describe(
-        'Tag mode: true when the tag follows the RFC 5646 syntax (or is a registered grandfathered tag).',
-      ),
+      .describe('Tag mode: true when the tag follows RFC 5646 syntax or is grandfathered.'),
     valid: z
       .boolean()
       .optional()
       .describe(
-        'Tag mode: true when the tag is well-formed, every language, extlang, script, region, and variant subtag is registered and correctly placed, and no variant or extension singleton repeats.',
+        'Tag mode: true when well-formed, every subtag is registered and correctly placed, and no variant or singleton repeats.',
       ),
     canonical_tag: z
       .string()
       .optional()
       .describe(
-        'Tag mode, valid tags only: the canonical form (deprecated subtags replaced by their preferred values, extlang form reduced, case normalized).',
+        'Tag mode, valid tags only: canonical form (preferred values applied, extlang reduced, case normalized).',
       ),
     subtags: z
       .array(
@@ -205,7 +183,7 @@ export const lookupLanguageTag = tool('iana_lookup_language_tag', {
             subtag: z
               .string()
               .describe(
-                'The subtag in its canonical case; the whole sequence for an extension or private-use part; the whole tag for a grandfathered or redundant record.',
+                'Subtag in canonical case; the whole sequence of an extension or private-use part; the whole tag for grandfathered/redundant.',
               ),
             position: z
               .enum([
@@ -219,21 +197,19 @@ export const lookupLanguageTag = tool('iana_lookup_language_tag', {
                 'grandfathered',
                 'redundant',
               ])
-              .describe(
-                'Where the subtag sits in the tag, or grandfathered/redundant for a whole-tag registry record.',
-              ),
+              .describe('Position in the tag; grandfathered/redundant for a whole-tag record.'),
             registered: z
               .boolean()
               .describe(
-                'True when a registry record covers the subtag at this position (private-use ranges included). Always false for extension and private-use parts, which the registry does not list.',
+                'True when a record covers the subtag at this position (private-use ranges count); always false for extension and private-use parts.',
               ),
             ...recordFields,
           })
-          .describe('One part of the tag with its registry record.'),
+          .describe('One part of the tag.'),
       )
       .optional()
       .describe(
-        'Tag mode: the parts of the tag in order, after any whole-tag record. Parsing stops at the first part the syntax cannot place (reported in issues).',
+        'Tag mode: the parts in order, after any whole-tag record; parsing stops at the first part the syntax cannot place.',
       ),
     issues: z
       .array(
@@ -250,19 +226,19 @@ export const lookupLanguageTag = tool('iana_lookup_language_tag', {
                 'extension_not_validated',
               ])
               .describe(
-                'unknown: not registered for its position. wrong_position: the syntax cannot place it here, or it repeats, or an extlang follows the wrong language. Both make the tag invalid; the other kinds are advisory.',
+                'unknown (not registered for its position) and wrong_position (misplaced, repeated, or an extlang after the wrong language) make the tag invalid; the rest are advisory.',
               ),
             message: z.string().describe('What is wrong and what to use instead.'),
           })
           .describe('One finding about the tag.'),
       )
       .optional()
-      .describe('Tag mode: everything found wrong or worth knowing; empty for a clean tag.'),
+      .describe('Tag mode: findings; empty for a clean tag.'),
     also_registered_as: z
       .array(TypedRecordSchema)
       .optional()
       .describe(
-        'Tag mode, single-subtag input: records of other types under the same subtag, e.g. the region "TW" (Taiwan) beside the language "tw" (Twi).',
+        'Tag mode, single-subtag input: records of other types under the same subtag, e.g. region "TW" beside language "tw".',
       ),
     matches: z
       .array(TypedRecordSchema)

@@ -82,55 +82,35 @@ function classify(raw: string): Requested {
 
 const GroupSchema = z
   .object({
-    acronym: z
-      .string()
-      .describe('Group acronym, e.g. "httpbis"; "none" for individual submissions.'),
+    acronym: z.string().describe('E.g. "httpbis"; "none" for individual submissions.'),
     name: z.string().describe('Group name.'),
-    type: z
-      .string()
-      .describe('Group type as Datatracker labels it, e.g. "WG", "RG", "Individual".'),
+    type: z.string().describe('E.g. "WG", "RG", "Individual".'),
   })
-  .describe('The Datatracker group responsible for the document.');
+  .describe('The responsible Datatracker group.');
 
 const RfcSchema = z
   .object({
     status: z
       .string()
       .describe('Current status per the RFC Editor, e.g. "INTERNET STANDARD", "HISTORIC".'),
-    published_status: z
-      .string()
-      .describe('Status at publication, which a later action may have changed.'),
-    stream: z
-      .string()
-      .optional()
-      .describe('Publication stream from Datatracker, e.g. "IETF", "IRTF", "IAB", "ISE".'),
+    published_status: z.string().describe('Status at publication, which may since have changed.'),
+    stream: z.string().optional().describe('Stream, e.g. "IETF", "IRTF", "IAB", "ISE".'),
     group: GroupSchema.optional(),
     published: z.string().describe('Publication month and year, e.g. "June 2022".'),
-    page_count: z.number().optional().describe('Page count as published.'),
-    authors: z
-      .array(z.string().describe('One author, as published.'))
-      .describe('Authors as published.'),
-    obsoletes: z
-      .array(z.string().describe('An RFC id, e.g. "RFC 7230".'))
-      .describe('RFCs this RFC obsoletes.'),
-    obsoleted_by: z
-      .array(z.string().describe('An RFC id.'))
-      .describe('RFCs that obsolete this RFC; empty when it is not obsoleted.'),
-    updates: z.array(z.string().describe('An RFC id.')).describe('RFCs this RFC updates.'),
-    updated_by: z.array(z.string().describe('An RFC id.')).describe('RFCs that update this RFC.'),
-    see_also: z
-      .array(z.string().describe('A document id.'))
-      .describe('Related documents the RFC Editor lists, e.g. the BCP or STD it belongs to.'),
-    doi: z.string().describe('DOI of the RFC, e.g. "10.17487/RFC9110".'),
-    errata_url: z.string().optional().describe('The RFC Editor errata page, when errata exist.'),
-    draft_name: z
-      .string()
-      .optional()
-      .describe('The Internet-Draft the RFC was published from, as the RFC Editor names it.'),
+    page_count: z.number().optional().describe('Page count.'),
+    authors: z.array(z.string()).describe('Authors as published.'),
+    obsoletes: z.array(z.string()).describe('RFCs this RFC obsoletes, e.g. "RFC 7230".'),
+    obsoleted_by: z.array(z.string()).describe('RFCs that obsolete this RFC.'),
+    updates: z.array(z.string()).describe('RFCs this RFC updates.'),
+    updated_by: z.array(z.string()).describe('RFCs that update this RFC.'),
+    see_also: z.array(z.string()).describe('Related documents, e.g. its BCP or STD.'),
+    doi: z.string().describe('DOI, e.g. "10.17487/RFC9110".'),
+    errata_url: z.string().optional().describe('Errata page, when errata exist.'),
+    draft_name: z.string().optional().describe('The Internet-Draft it was published from.'),
     url: z.string().describe('The RFC on the RFC Editor site.'),
     datatracker_url: z.string().describe('The RFC on the IETF Datatracker.'),
   })
-  .describe('RFC status and relations. Present when kind is rfc and found is true.');
+  .describe('Present when kind is rfc and found is true.');
 
 const DraftSchema = z
   .object({
@@ -138,8 +118,8 @@ const DraftSchema = z
     requested_revision: z
       .string()
       .optional()
-      .describe('The revision suffix the request named, when the draft was found by dropping it.'),
-    state: z.string().describe('Datatracker state, e.g. "Active", "Expired", "Replaced", "RFC".'),
+      .describe('The revision suffix requested, when the draft was found without it.'),
+    state: z.string().describe('E.g. "Active", "Expired", "Replaced", "RFC".'),
     iesg_state: z.string().optional().describe('IESG state, e.g. "RFC Published".'),
     rfceditor_state: z.string().optional().describe('RFC Editor queue state, when in the queue.'),
     stream: z.string().optional().describe('Stream, e.g. "IETF".'),
@@ -148,21 +128,14 @@ const DraftSchema = z
       .string()
       .optional()
       .describe('Intended status, e.g. "Proposed Standard".'),
-    last_updated: z.string().describe('Last-updated time per Datatracker, "YYYY-MM-DD HH:MM:SS".'),
+    last_updated: z.string().describe('Last-updated time, "YYYY-MM-DD HH:MM:SS".'),
     expires: z.string().optional().describe('Expiry time of the latest revision.'),
-    replaced_by: z
-      .array(z.string().describe('A document name.'))
-      .describe('Documents that replaced this draft.'),
-    replaces: z
-      .array(z.string().describe('A document name.'))
-      .describe('Documents this draft replaced.'),
-    became_rfc: z
-      .string()
-      .optional()
-      .describe('The RFC this draft was published as, e.g. "RFC 9110".'),
+    replaced_by: z.array(z.string()).describe('Documents that replaced this draft.'),
+    replaces: z.array(z.string()).describe('Documents this draft replaced.'),
+    became_rfc: z.string().optional().describe('The RFC it became, e.g. "RFC 9110".'),
     datatracker_url: z.string().describe('The draft on the IETF Datatracker.'),
   })
-  .describe('Internet-Draft state and relations. Present when kind is draft and found is true.');
+  .describe('Present when kind is draft and found is true.');
 
 /** One `documents[]` entry. */
 interface RfcDocument {
@@ -349,12 +322,12 @@ export const getRfcStatus = tool('iana_get_rfc_status', {
             id: z
               .string()
               .describe(
-                'The document as resolved: "RFC 9110", a draft name without revision, or the id as given when unsupported or not found.',
+                'As resolved: "RFC 9110", a draft name without revision, or the id as given when unsupported or not found.',
               ),
             kind: z
               .enum(['rfc', 'draft', 'unsupported'])
               .describe(
-                'How the id was read. unsupported covers BCP/STD/FYI labels and unrecognized text.',
+                'How the id was read; unsupported covers BCP/STD/FYI and unrecognized text.',
               ),
             found: z.boolean().describe('True when the document exists upstream.'),
             guidance: z
@@ -373,9 +346,9 @@ export const getRfcStatus = tool('iana_get_rfc_status', {
         z
           .object({
             id: z.string().describe('The document whose lookup failed.'),
-            error: z.string().describe('What failed upstream. Retry these ids later.'),
+            error: z.string().describe('What failed upstream; retry later.'),
           })
-          .describe('One id whose upstream lookup failed.'),
+          .describe('One failed id.'),
       )
       .describe('Ids whose lookup failed upstream; the rest of the batch still answered.'),
   }),
