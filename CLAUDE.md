@@ -246,6 +246,7 @@ src/
       language-registry-parser.ts       # Language Subtag Registry (record-jar) parser
       language-tag.ts                   # BCP 47 tag analysis and canonicalization
       search-text.ts                    # Token-search normalization
+      index-search.ts                   # Registry search: singular/plural fold, ranked order (iana_search_registries only)
       personal-data.ts                  # Email scrubbing, PEN organization withholding
       types.ts                          # Registry domain types
     media-template/
