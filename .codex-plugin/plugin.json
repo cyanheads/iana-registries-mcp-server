@@ -1,6 +1,6 @@
 {
   "name": "iana-registries-mcp-server",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Look up IANA ports, media types, HTTP status codes and fields, URI schemes, enterprise numbers, and BCP 47 language tags; check RFC status; search and read any IANA registry.",
   "author": {
     "name": "cyanheads",

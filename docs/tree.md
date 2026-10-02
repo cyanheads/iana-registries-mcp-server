@@ -1,6 +1,6 @@
 # iana-registries-mcp-server - Directory Structure
 
-Generated on: 2026-10-01 16:17:54
+Generated on: 2026-10-02 14:03:34
 
 ```text
 iana-registries-mcp-server/
@@ -25,6 +25,7 @@ iana-registries-mcp-server/
 │   └── settings.json
 ├── changelog/
 │   ├── 0.1.x/
+│   ├── 0.2.x/
 │   └── template.md
 ├── docs/
 │   └── design.md
@@ -159,6 +160,7 @@ iana-registries-mcp-server/
 │   │   │   ├── media-template-reader.ts
 │   │   │   └── template-statements.ts
 │   │   ├── registry/
+│   │   │   ├── index-search.ts
 │   │   │   ├── language-registry-parser.ts
 │   │   │   ├── language-tag.ts
 │   │   │   ├── pen-parser.ts
@@ -179,6 +181,7 @@ iana-registries-mcp-server/
 │   │   ├── ietf.ts
 │   │   ├── language-registry.ts
 │   │   ├── language-tags.ts
+│   │   ├── live-index-excerpt.ts
 │   │   ├── media-registry.ts
 │   │   ├── pen.ts
 │   │   ├── port-registry.ts
@@ -193,6 +196,7 @@ iana-registries-mcp-server/
 │   │   │   ├── media-template-reader.test.ts
 │   │   │   └── template-statements.test.ts
 │   │   ├── registry/
+│   │   │   ├── index-search.test.ts
 │   │   │   ├── language-registry-parser.test.ts
 │   │   │   ├── language-tag.test.ts
 │   │   │   ├── pen-parser.test.ts
@@ -214,6 +218,7 @@ iana-registries-mcp-server/
 │       ├── format-blockquotes.test.ts
 │       ├── get-registry-records.test.ts
 │       ├── get-rfc-status.test.ts
+│       ├── keyword-fold-isolation.test.ts
 │       ├── list-enrichment.test.ts
 │       ├── lookup-http-field.test.ts
 │       ├── lookup-http-status.test.ts
