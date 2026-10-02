@@ -30,7 +30,6 @@ export interface RfcRecord {
   published: string;
   /** Status as published. */
   publishedStatus: string;
-  seeAlso: string[];
   /** Current status, e.g. "INTERNET STANDARD" or "HISTORIC". */
   status: string;
   title?: string;

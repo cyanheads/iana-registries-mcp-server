@@ -898,7 +898,7 @@ describeFailureContract({
   reason: 'upstream_unreadable',
   recovery: 'The IANA registry file could not be read; retry iana_lookup_port in a minute.',
   unreadable: [
-    { label: 'an HTML page served as 200', attempts: 3, response: () => htmlResponse('<html/>') },
+    { label: 'an HTML page served as 200', attempts: 1, response: () => htmlResponse('<html/>') },
     {
       label: 'a body with no registry root',
       attempts: 3,

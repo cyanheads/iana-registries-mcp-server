@@ -40,17 +40,20 @@ export interface ToolSetupOptions {
 
 /**
  * Builds the upstream fake, the store over it (installed process-wide), and a
- * manual clock. `serve` scripts answers by exact URL; an unscripted URL throws,
- * so an unexpected fetch is loud.
+ * manual clock. `serve` scripts answers by exact URL, and `serveWhere` answers
+ * the URLs a predicate accepts when no exact answer is scripted; an unscripted
+ * URL throws, so an unexpected fetch is loud.
  */
 export function setupTools(options: ToolSetupOptions = {}) {
   let clock = T0;
   const routes = new Map<string, Answer>();
+  const matchers: { answer: Answer; test: (url: URL) => boolean }[] = [];
   const h = createHarness([{ match: /./, respond: (request) => answerFor(request) }], {
     pacing: options.pacing ?? PERMISSIVE_PACING,
   });
   const answerFor = (request: Request): Response | Promise<Response> => {
-    const answer = routes.get(request.url);
+    const url = new URL(request.url);
+    const answer = routes.get(request.url) ?? matchers.find((matcher) => matcher.test(url))?.answer;
     if (!answer) throw new Error(`No upstream answer scripted for ${request.url}`);
     return answer(request);
   };
@@ -66,6 +69,10 @@ export function setupTools(options: ToolSetupOptions = {}) {
     /** Script answers by exact URL, e.g. `{ [url]: () => xmlResponse(xml) }`; later calls replace earlier ones. */
     serve(answers: Record<string, Answer>) {
       for (const [url, answer] of Object.entries(answers)) routes.set(url, answer);
+    },
+    /** Answers every URL `test` accepts that has no exact answer; a later call takes precedence. */
+    serveWhere(test: (url: URL) => boolean, answer: Answer) {
+      matchers.unshift({ test, answer });
     },
     /** Answers every scripted URL with `answer` from now on. */
     answerAll(answer: Answer) {

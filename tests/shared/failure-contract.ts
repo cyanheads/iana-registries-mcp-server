@@ -1,9 +1,10 @@
 /**
  * @fileoverview The upstream-failure rows every registry-backed tool shares,
  * registered as one `describe` block per tool: the `pacer_shed` row, upstream
- * 5xx and 429, unreadable answers (`reason` + `recovery` reach the result),
- * the call deadline, caller cancellation, the stale-copy disclosure in both
- * surfaces, and the 2-minute hold. Each tool file calls
+ * 5xx and 429, unreadable answers (`reason` + `recovery` reach the result), a
+ * plain-http redirect followed over https and an off-host redirect refused
+ * without a retry, the call deadline, caller cancellation, the stale-copy
+ * disclosure in both surfaces, and the 2-minute hold. Each tool file calls
  * {@link describeFailureContract} with its fetch target and a valid body.
  * @module tests/shared/failure-contract
  */
@@ -19,7 +20,13 @@ import {
   STALE_MAX_MS,
 } from '@/services/registry/registry-store.js';
 import { callTool, setupTools } from './tool-harness.js';
-import { hang, makeBudget, statusResponse } from './upstream-harness.js';
+import {
+  hang,
+  makeBudget,
+  REDIRECT_OFF_HOST_HINT,
+  redirectResponse,
+  statusResponse,
+} from './upstream-harness.js';
 
 /** A 200 the service must refuse, and how many fetches the retry ladder spends on it. */
 export interface UnreadableAnswer {
@@ -191,6 +198,35 @@ export function describeFailureContract(c: FailureContractCase): void {
         expect(s.fetches()).toBe(attempts);
       },
     );
+
+    it('follows a plain-http redirect on www.iana.org over https, sending no plain-http request', async () => {
+      const s = setupTools();
+      const moved = `https://www.iana.org/moved${new URL(c.url).pathname}`;
+      s.serve({
+        [c.url]: () => redirectResponse(moved.replace(/^https:/, 'http:')),
+        [moved]: c.ok,
+      });
+      const out = await callTool(c.definition, c.input);
+      expect(out.isError).toBe(false);
+      expect(s.fetched()).toEqual([c.url, moved]);
+    });
+
+    it('refuses a redirect off the upstream hosts after one fetch: not retryable, with a hint that does not say to retry', async () => {
+      const s = setupTools();
+      s.serve({ [c.url]: () => redirectResponse('https://evil.example/registry') });
+      const out = await callTool(c.definition, c.input);
+      expect(out.isError).toBe(true);
+      expect(out.structured.error).toMatchObject({
+        code: JsonRpcErrorCode.ServiceUnavailable,
+        data: { reason: c.reason, retryable: false, recovery: { hint: REDIRECT_OFF_HOST_HINT } },
+      });
+      expect(out.text).toContain(`Recovery: ${REDIRECT_OFF_HOST_HINT}`);
+      expect(out.text).toContain(`reason ${c.reason} · not retryable`);
+      expect(out.text).not.toContain(c.recovery);
+      expect(out.text).not.toContain('attempts');
+      expect(REDIRECT_OFF_HOST_HINT).not.toMatch(/retry/i);
+      expect(s.fetched()).toEqual([c.url]);
+    });
 
     it('an unexpected status on the fixed URL (403) surfaces the same unreadable reason', async () => {
       const s = setupTools();

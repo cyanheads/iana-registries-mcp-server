@@ -3,10 +3,12 @@
  * per-RFC JSON (current and as-published status, relations, errata, authors)
  * and the IETF Datatracker — `doc.json` for stream, group, and draft state, and
  * the REST API's `relateddocument` table for replaces, replaced-by, and
- * became-RFC edges. Every read is one `small`-profile request inside the
- * caller's budget, with no cache. Datatracker answers an unrecognized query
+ * became-RFC edges and for the `contains` edges that tie a BCP, STD, or FYI
+ * series to its member RFCs. Every read is one `small`-profile request inside
+ * the caller's budget, with no cache. Datatracker answers an unrecognized query
  * parameter with the unfiltered table, so its query strings are built only
- * from {@link DATATRACKER_QUERY_KEYS}. Author emails and affiliations, the
+ * from {@link DATATRACKER_QUERY_KEYS}, and a page with more after it is
+ * unreadable rather than a short list. Author emails and affiliations, the
  * responsible AD, and the shepherd are never parsed.
  * @module services/ietf/ietf-doc-service
  */
@@ -41,6 +43,7 @@ export const DATATRACKER_QUERY_KEYS = [
   'limit',
   'source__name',
   'target__name',
+  'target__name__in',
   'relationship',
   'relationship__in',
 ] as const;
@@ -95,7 +98,6 @@ const RfcJsonSchema = z.object({
   obsoleted_by: z.array(z.string()).nullish(),
   updates: z.array(z.string()).nullish(),
   updated_by: z.array(z.string()).nullish(),
-  see_also: z.array(z.string()).nullish(),
   doi: z.string(),
   errata_url: z.string().nullish(),
   draft: z.string().nullish(),
@@ -119,7 +121,9 @@ const DocJsonSchema = z.object({
 });
 type DocJson = z.infer<typeof DocJsonSchema>;
 
+/** A `relateddocument` page; `meta.next` is the page after it, `null` on the last one. */
 const RelatedJsonSchema = z.object({
+  meta: z.object({ next: z.string().nullable() }),
   objects: z.array(z.object({ relationship: z.string(), source: z.string(), target: z.string() })),
 });
 
@@ -155,9 +159,18 @@ function present(value: string | null | undefined): string | undefined {
 
 /** "RFC7230" → "RFC 7230"; any other id verbatim. */
 function relationId(id: string): string {
-  const match = /^rfc0*(\d+)$/i.exec(id.trim());
+  const match = /^rfc0*([1-9]\d*)$/i.exec(id.trim());
   return match ? `RFC ${match[1]}` : id;
 }
+
+/** "bcp14" → "BCP 14", the form the RFC Editor writes a series in; any other name verbatim. */
+function seriesId(name: string): string {
+  const match = /^(?:bcp|std|fyi)0*([1-9]\d*)$/i.exec(name);
+  return match ? `${name.slice(0, 3).toUpperCase()} ${match[1]}` : name;
+}
+
+/** Orders ids by their numbers: "RFC 919" before "RFC 1112", "BCP 47" before "STD 97". */
+const byNumber = new Intl.Collator('en', { numeric: true }).compare;
 
 /** The last path segment of a Datatracker API URI: a document name or a relationship slug. */
 function lastSegment(uri: string): string {
@@ -185,7 +198,6 @@ function toRfcRecord(json: z.infer<typeof RfcJsonSchema>, number: number): RfcRe
     obsoletedBy: (json.obsoleted_by ?? []).map(relationId),
     updates: (json.updates ?? []).map(relationId),
     updatedBy: (json.updated_by ?? []).map(relationId),
-    seeAlso: (json.see_also ?? []).map(relationId),
     doi: json.doi,
     ...(errataUrl ? { errataUrl } : {}),
     ...(draftName ? { draftName } : {}),
@@ -280,9 +292,14 @@ export class IetfDocService {
 
   /** The `replaces` / `became_rfc` edges out of `name` and the `replaces` edges into it. */
   async getDraftRelations(name: string, budget: CallBudget): Promise<DraftRelations> {
+    const operation = 'IetfDocService.getDraftRelations';
     const [outgoing, incoming] = await Promise.all([
-      this.#related({ source__name: name, relationship__in: 'replaces,became_rfc' }, budget),
-      this.#related({ target__name: name, relationship: 'replaces' }, budget),
+      this.#related(
+        { source__name: name, relationship__in: 'replaces,became_rfc' },
+        budget,
+        operation,
+      ),
+      this.#related({ target__name: name, relationship: 'replaces' }, budget, operation),
     ]);
     const from = outgoing.filter((edge) => edge.source === name);
     const becameRfc = from.find((edge) => edge.relationship === 'became_rfc')?.target;
@@ -293,6 +310,43 @@ export class IetfDocService {
         .map((edge) => edge.source),
       ...(becameRfc ? { becameRfc: relationId(becameRfc) } : {}),
     };
+  }
+
+  /**
+   * The series ("BCP 14") each of RFCs `numbers` belongs to, from one read of
+   * the `contains` edges into all of them. An RFC in no series is absent from
+   * the map.
+   */
+  async getRfcSeries(
+    numbers: readonly number[],
+    budget: CallBudget,
+  ): Promise<Map<number, string[]>> {
+    const byName = new Map(numbers.map((number) => [`rfc${number}`, number]));
+    const edges = await this.#related(
+      { target__name__in: [...byName.keys()].join(','), relationship: 'contains' },
+      budget,
+      'IetfDocService.getRfcSeries',
+    );
+    const series = new Map<number, string[]>();
+    for (const { relationship, source, target } of edges) {
+      const number = byName.get(target);
+      if (relationship !== 'contains' || number === undefined) continue;
+      series.set(number, [...(series.get(number) ?? []), seriesId(source)].sort(byNumber));
+    }
+    return series;
+  }
+
+  /** The member RFCs of series `name` ("bcp14") as "RFC N", in ascending order; empty when it has none. */
+  async getSeriesMembers(name: string, budget: CallBudget): Promise<string[]> {
+    const edges = await this.#related(
+      { source__name: name, relationship: 'contains' },
+      budget,
+      'IetfDocService.getSeriesMembers',
+    );
+    return edges
+      .filter((edge) => edge.relationship === 'contains' && edge.source === name)
+      .map((edge) => relationId(edge.target))
+      .sort(byNumber);
   }
 
   #getDoc(
@@ -315,25 +369,39 @@ export class IetfDocService {
     });
   }
 
-  /** One `relateddocument` page as `{ relationship, source, target }` names. */
+  /**
+   * The edges of one `relateddocument` query as `{ relationship, source, target }`
+   * names, logged under the caller's `operation`. A page with more after it is
+   * unreadable: its edges alone would read as a short list.
+   */
   #related(
     filters: DatatrackerQuery,
     budget: CallBudget,
+    operation: string,
   ): Promise<{ relationship: string; source: string; target: string }[]> {
     const url = relatedDocumentsUrl(filters);
     return this.#client.request(url, {
       budget,
       profile: 'small',
-      operation: 'IetfDocService.getDraftRelations',
+      operation,
       accept: [200],
       expect: 'json',
       maxBytes: DATATRACKER_MAX_BYTES,
-      parse: (response) =>
-        parseJson(response.body, RelatedJsonSchema, url).objects.map((edge) => ({
+      parse: (response) => {
+        const page = parseJson(response.body, RelatedJsonSchema, url);
+        if (page.meta.next !== null) {
+          const host = new URL(url).hostname;
+          throw upstreamUnreadable(
+            `${host} sent a page of ${url} with more pages after it; one page alone would drop edges.`,
+            { host, url },
+          );
+        }
+        return page.objects.map((edge) => ({
           relationship: lastSegment(edge.relationship),
           source: lastSegment(edge.source),
           target: lastSegment(edge.target),
-        })),
+        }));
+      },
     });
   }
 }

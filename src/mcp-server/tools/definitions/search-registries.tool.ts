@@ -1,14 +1,15 @@
 /**
  * @fileoverview `iana_search_registries` — find IANA protocol registries and
  * sub-registries by keyword over the protocol registry index (titles,
- * categories, ids). Returns the ids `iana_get_registry_records` reads.
+ * categories, ids), singular and plural alike, closest titles first. Returns
+ * the ids `iana_get_registry_records` reads.
  * @module mcp-server/tools/definitions/search-registries
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { searchIndex } from '@/services/registry/index-search.js';
 import { getRegistryStore } from '@/services/registry/registry-store.js';
-import { compileQuery, matchesQuery } from '@/services/registry/search-text.js';
 import type { IndexEntry } from '@/services/registry/types.js';
 import { startCallBudget } from '@/services/upstream/call-budget.js';
 import { discloseList, echo, offsetListEnrichment, offsetPage } from '../shared/list-enrichment.js';
@@ -31,13 +32,13 @@ function toRegistry(entry: IndexEntry) {
 export const searchRegistries = tool('iana_search_registries', {
   title: 'Search IANA registries',
   description:
-    'Find IANA protocol registries and sub-registries by keyword over their titles and protocol categories, e.g. "tls cipher", "dns resource record", "ip protocol numbers". Returns the registry and sub-registry ids that iana_get_registry_records reads, with registration procedure and defining documents. Covers every registry linked from the IANA protocol registries index.',
+    'Find IANA protocol registries and sub-registries by keyword over their titles and protocol categories, e.g. "tls cipher", "dns resource record", "protocol numbers". Returns the registry and sub-registry ids that iana_get_registry_records reads, with registration procedure and defining documents. Covers every registry linked from the IANA protocol registries index.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
     query: z
       .preprocess((value) => (typeof value === 'string' ? value.trim() : value), searchWords())
       .describe(
-        'Words matched as whole tokens against registry titles, categories, and ids, e.g. "tls cipher". An exact registry or sub-registry id ranks first.',
+        'Words matched as whole tokens, singular or plural, against registry titles, categories, and ids, e.g. "tls cipher". An exact registry or sub-registry id ranks first, then the closest titles.',
       ),
     limit: limitInput(50, 15),
     offset: offsetInput(),
@@ -53,7 +54,11 @@ export const searchRegistries = tool('iana_search_registries', {
               .optional()
               .describe('Pass as subregistry to iana_get_registry_records.'),
             title: z.string().describe('Registry or sub-registry title.'),
-            category: z.string().describe('Protocol category in the index.'),
+            category: z
+              .string()
+              .describe(
+                'Protocol category in the index; an entry listed under several joins them with "; ".',
+              ),
             registration_procedure: z
               .string()
               .optional()
@@ -74,7 +79,7 @@ export const searchRegistries = tool('iana_search_registries', {
           })
           .describe('One index entry.'),
       )
-      .describe('Matching index entries: exact id hits first, then index order.'),
+      .describe('Matching index entries: exact id hits first, then the closest titles.'),
     source: SourceSchema,
   }),
   enrichment: offsetListEnrichment,
@@ -103,15 +108,7 @@ export const searchRegistries = tool('iana_search_registries', {
     const budget = startCallBudget(ctx);
     const { model, source } = await getRegistryStore().getIndex(budget);
 
-    const query = compileQuery(input.query);
-    const wanted = input.query.toLowerCase();
-    const isExact = (entry: IndexEntry) =>
-      entry.registryId.toLowerCase() === wanted || entry.subregistryId?.toLowerCase() === wanted;
-    const exact = model.entries.filter(isExact);
-    const rest = model.entries.filter(
-      (entry) => !isExact(entry) && matchesQuery(entry.searchText, query),
-    );
-    const matches = [...exact, ...rest];
+    const matches = searchIndex(model, input.query);
     const page = offsetPage(matches, {
       offset: input.offset,
       limit: input.limit,

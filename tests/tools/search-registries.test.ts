@@ -1,10 +1,13 @@
 /**
  * @fileoverview Tests for `iana_search_registries`: whole-token search over
- * titles, categories, and ids, exact-id ranking, limits and truncation, input
+ * titles, categories, and ids with singular and plural folded, the order
+ * (exact id, title distance, missing words, index position), a pair listed
+ * under two categories returned once, limits and truncation, input
  * validation, the index floor and `index_unreadable`, the stale-index
  * disclosure, the list-enrichment contract, and `format()` parity and
- * sanitizing. The index page is a synthetic fixture served through a
- * `createFetchMock` fake behind the injected `UpstreamClient`.
+ * sanitizing. Index pages are synthetic fixtures or an excerpt of the live
+ * index, served through a `createFetchMock` fake behind the injected
+ * `UpstreamClient`.
  */
 
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
@@ -16,11 +19,23 @@ import {
   PROTOCOL_INDEX_URL,
   STALE_MAX_MS,
 } from '@/services/registry/registry-store.js';
-import { indexHtmlWith, SMALL_INDEX_HTML } from '../fixtures/protocol-index.js';
+import { liveIndexHtml } from '../fixtures/live-index-excerpt.js';
+import {
+  categoryRow,
+  entryRow,
+  indexHtmlWith,
+  indexPage,
+  SMALL_INDEX_HTML,
+} from '../fixtures/protocol-index.js';
 import { SEARCH_ENTRIES, searchIndexHtml } from '../fixtures/search-index.js';
 import { describeFailureContract } from '../shared/failure-contract.js';
 import { callTool, setupTools, T0 } from '../shared/tool-harness.js';
-import { htmlResponse, statusResponse, xmlResponse } from '../shared/upstream-harness.js';
+import {
+  BODY_OVER_CEILING_HINT,
+  htmlResponse,
+  statusResponse,
+  xmlResponse,
+} from '../shared/upstream-harness.js';
 
 const INDEX_HTML = searchIndexHtml();
 const INDEX_HINT =
@@ -304,6 +319,192 @@ describe('iana_search_registries: offset paging', () => {
   });
 });
 
+describe('iana_search_registries: singular and plural', () => {
+  it('matches a singular query against plural titles and categories, and the reverse', async () => {
+    boot();
+    expect(ids(await call({ query: 'cipher suite' }))).toEqual(['example-tls#example-tls-4']);
+    expect(ids(await call({ query: 'resource record type' }))).toEqual(['example-dns']);
+    expect(ids(await call({ query: 'alpha note' }))).toEqual(['rank-first']);
+    expect(ids(await call({ query: 'mixed case examples' }))).toEqual(['Example-Mixed']);
+    expect((await call({ query: 'example protocol', limit: 50 })).structured).toMatchObject({
+      totalCount: SEARCH_ENTRIES.length,
+    });
+  });
+
+  it('keeps every match of the written form: plural queries still find plural titles', async () => {
+    boot();
+    expect(ids(await call({ query: 'cipher suites' }))).toEqual(['example-tls#example-tls-4']);
+    expect(ids(await call({ query: 'cipher extensions' }))).toEqual(['example-tls#example-tls-5']);
+  });
+});
+
+describe('iana_search_registries: order', () => {
+  const RANKED_HTML = searchIndexHtml([
+    { href: '/assignments/gizmo#command-codes', title: 'Gizmo Command Codes' },
+    { href: '/assignments/widget-misc#legacy', title: 'Legacy Widget Numbers for Gadgets' },
+    { href: '/assignments/widget-params#codes', title: 'Widget Option Codes' },
+    { href: '/assignments/widget-params#options', title: 'Options for Widgets' },
+    { href: '/assignments/gizmo-params#gizmo-params-3', title: 'Command Codes' },
+    { href: '/assignments/widget-numbers#widget-numbers-1', title: 'Assigned Widget Numbers' },
+  ]);
+
+  it('ranks the registry whose id the query names first, singular or plural', async () => {
+    boot(RANKED_HTML);
+    const expected = ['widget-numbers#widget-numbers-1', 'widget-misc#legacy'];
+    expect(ids(await call({ query: 'widget numbers' }))).toEqual(expected);
+    expect(ids(await call({ query: 'Widget Number' }))).toEqual(expected);
+    expect(ids(await call({ query: 'widget-numbers' }))).toEqual(expected);
+  });
+
+  it('ranks the closest title next, in both surfaces', async () => {
+    boot(RANKED_HTML);
+    const out = await call({ query: 'widget options' });
+    expect(ids(out)).toEqual(['widget-params#options', 'widget-params#codes']);
+    expect(out.text.indexOf('### Options for Widgets')).toBeLessThan(
+      out.text.indexOf('### Widget Option Codes'),
+    );
+  });
+
+  it('ranks a title equal to the query above a sub-registry whose id spells it', async () => {
+    boot(RANKED_HTML);
+    expect(ids(await call({ query: 'command codes' }))).toEqual([
+      'gizmo-params#gizmo-params-3',
+      'gizmo#command-codes',
+    ]);
+    expect(ids(await call({ query: 'command-codes' }))).toEqual([
+      'gizmo#command-codes',
+      'gizmo-params#gizmo-params-3',
+    ]);
+  });
+
+  it('describes the order and the joined categories in its output schema', () => {
+    const shape = searchRegistries.output.shape.registries;
+    expect(shape.description).toBe(
+      'Matching index entries: exact id hits first, then the closest titles.',
+    );
+    expect(shape.element.shape.category.description).toBe(
+      'Protocol category in the index; an entry listed under several joins them with "; ".',
+    );
+  });
+
+  it('gives "protocol numbers", which ranks its registry first, as its example', () => {
+    expect(searchRegistries.description).toContain('"protocol numbers"');
+    expect(searchRegistries.description).not.toContain('ip protocol numbers');
+  });
+});
+
+describe('iana_search_registries: a pair listed under two categories', () => {
+  const TWICE_HTML = indexPage(
+    ...Array.from({ length: 2_000 }, (_, index) =>
+      entryRow({ href: `/assignments/filler-${index % 520}#f${index}`, title: `Filler ${index}` }),
+    ),
+    categoryRow('Interface Parameters'),
+    entryRow({ href: '/assignments/smi-example#smi-example-5', title: 'Example Types (exType)' }),
+    categoryRow('Management Information'),
+    entryRow({ href: '/assignments/smi-example#smi-example-5', title: 'Example Types (exType)' }),
+  );
+
+  it('returns it once, its categories joined with "; ", in both surfaces', async () => {
+    boot(TWICE_HTML);
+    const out = await call({ query: 'example types' });
+    expect(rows(out)).toEqual([
+      expect.objectContaining({
+        registry_id: 'smi-example',
+        subregistry_id: 'smi-example-5',
+        category: 'Interface Parameters; Management Information',
+      }),
+    ]);
+    expect(out.structured).toMatchObject({ totalCount: 1, shown: 1 });
+    expect(out.text).toContain('**Category:** Interface Parameters; Management Information');
+  });
+
+  it('finds it through the words of either category, or both', async () => {
+    boot(TWICE_HTML);
+    for (const query of [
+      'interface parameters',
+      'management information',
+      'interface management',
+    ]) {
+      expect(ids(await call({ query }))).toEqual(['smi-example#smi-example-5']);
+    }
+  });
+});
+
+describe('iana_search_registries: the live index', () => {
+  const LIVE_HTML = liveIndexHtml();
+
+  it.each([
+    ['protocol numbers', 'protocol-numbers#protocol-numbers-1'],
+    ['dhcpv6 options', 'dhcpv6-parameters#dhcpv6-parameters-2'],
+    ['dhcp options', 'bootp-dhcp-parameters#options'],
+    ['ethertype', 'ieee-802-numbers#ieee-802-numbers-1'],
+    ['media types', 'media-types'],
+    ['tls cipher suites', 'tls-parameters#tls-parameters-4'],
+    ['dns rr types', 'dns-parameters#dns-parameters-4'],
+    ['cbor tags', 'cbor-tags#tags'],
+    ['http methods', 'http-methods#methods'],
+    ['command codes', 'aaa-parameters#aaa-parameters-47'],
+  ])('"%s" ranks %s first', async (query, first) => {
+    boot(LIVE_HTML);
+    expect(ids(await call({ query }))[0]).toBe(first);
+  });
+
+  it('"tls extensions" ranks the TLS ExtensionType registry within the first two', async () => {
+    boot(LIVE_HTML);
+    const top = ids(await call({ query: 'tls extensions' })).slice(0, 2);
+    expect(top).toContain('tls-extensiontype-values#tls-extensiontype-values-1');
+  });
+
+  it('"ip protocol numbers" cannot reach protocol-numbers: "ip" is none of its words', async () => {
+    boot(LIVE_HTML);
+    const out = await call({ query: 'ip protocol numbers' });
+    expect(out.structured).toMatchObject({ totalCount: 4 });
+    expect(ids(out)).not.toContain('protocol-numbers#protocol-numbers-1');
+  });
+
+  it('"interface types" lists each SMI table once, under both its categories', async () => {
+    boot(LIVE_HTML);
+    const out = await call({ query: 'interface types', limit: 50 });
+    const smi = rows(out).filter((row) => row.registry_id === 'smi-numbers');
+    expect(smi.map((row) => row.subregistry_id)).toEqual(['smi-numbers-5', 'smi-numbers-6']);
+    for (const row of smi) {
+      expect(row.category).toBe(
+        'Interface Parameters; Structure of Management Information (SMI) Numbers (MIB Module Registrations)',
+      );
+    }
+    expect(new Set(ids(out)).size).toBe(ids(out).length);
+    expect(ids(await call({ query: 'interface parameters mib' }))).toEqual([
+      'smi-numbers#smi-numbers-5',
+      'smi-numbers#smi-numbers-6',
+    ]);
+  });
+
+  it('pages "media types" in two offset pages, the short last page ending the list', async () => {
+    boot(LIVE_HTML);
+    const all = ids(await call({ query: 'media types', limit: 50 }));
+    const first = await call({ query: 'media types', limit: 15 });
+    const last = await call({ query: 'media types', limit: 15, offset: 15 });
+    expect(all).toHaveLength(28);
+    expect(first.structured).toMatchObject({ totalCount: 28, shown: 15, next_offset: 15 });
+    expect(last.structured).toMatchObject({ totalCount: 28, shown: 13, truncated: false });
+    expect(last.structured).not.toHaveProperty('next_offset');
+    expect([...ids(first), ...ids(last)]).toEqual(all);
+  });
+
+  it('pages every "protocol numbers" match once, none skipped or repeated', async () => {
+    boot(LIVE_HTML);
+    const paged: string[] = [];
+    for (const offset of [0, 50, 100, 150]) {
+      const page = await call({ query: 'protocol numbers', limit: 50, offset });
+      expect(page.structured).toMatchObject({ totalCount: 189 });
+      paged.push(...ids(page));
+    }
+    expect(paged).toHaveLength(189);
+    expect(new Set(paged).size).toBe(189);
+    expect(paged[0]).toBe('protocol-numbers#protocol-numbers-1');
+  });
+});
+
 describe('iana_search_registries: input validation', () => {
   it.each([
     ['a missing query', {}],
@@ -503,13 +704,21 @@ describe('iana_search_registries: index_unreadable', () => {
     expect((out.structured.error as { data: Record<string, unknown> }).data.reason).toBeUndefined();
   });
 
-  it('a body over the 8 MiB ceiling is index_unreadable', async () => {
+  it('a body over the 8 MiB ceiling is index_unreadable after one fetch: not retryable, in both surfaces', async () => {
     const s = boot('x'.repeat(8 * 1024 * 1024 + 1));
     const out = await call({ query: 'cipher' });
     expect(out.structured.error).toMatchObject({
-      data: { reason: 'index_unreadable', maxBytes: 8 * 1024 * 1024 },
+      data: {
+        reason: 'index_unreadable',
+        maxBytes: 8 * 1024 * 1024,
+        retryable: false,
+        recovery: { hint: BODY_OVER_CEILING_HINT },
+      },
     });
-    expect(s.fetches()).toBe(3);
+    expect(out.text).toContain(`Recovery: ${BODY_OVER_CEILING_HINT}`);
+    expect(out.text).toContain('reason index_unreadable · not retryable');
+    expect(out.text).not.toContain('attempts');
+    expect(s.fetches()).toBe(1);
   });
 });
 
@@ -523,7 +732,7 @@ describeFailureContract({
   unreadable: [
     {
       label: 'an XML body where HTML is expected',
-      attempts: 3,
+      attempts: 1,
       response: () => xmlResponse('<a/>'),
     },
     {

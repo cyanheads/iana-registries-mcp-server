@@ -3,8 +3,9 @@
  * top-level type, `<name>` mixing subtype and status annotation, `<file
  * type="template">` per record, one `<file name>` alias) and registration
  * template bodies in the three layouts the design names: labelled, numbered
- * vendor form, and bare `Name :`/`Email :` lines. Every person and address is
- * invented (`Example Person`, `example.org`).
+ * vendor form, and bare `Name :`/`Email :` lines, plus the placeholder page IANA
+ * serves for a type with no template and a registry excerpt for file-extension
+ * keywords. Every person and address is invented (`Example Person`, `example.org`).
  * @module tests/fixtures/media-registry
  */
 
@@ -135,6 +136,50 @@ export const MEDIA_XML = mediaXml({
   ].join('\n    '),
   haptics: mediaRecord({ name: 'ivs', file: 'haptics/ivs' }),
 });
+
+/**
+ * Records modeled on the live registry for file-extension keywords: `jpg` names
+ * only `image/vnd.sealedmedia.softseal.jpg`, `svg` and `epub` name no subtype
+ * though their type is present, three `doc` records fill a cut page at limit 2,
+ * and `png`, `json`, and `mpeg` are subtype names.
+ */
+export const EXTENSION_XML = mediaXml({
+  application: [
+    mediaRecord({ name: 'json', file: 'application/json' }),
+    mediaRecord({
+      name: 'vnd.3gpp.seal-group-doc+xml',
+      file: 'application/vnd.3gpp.seal-group-doc+xml',
+    }),
+    mediaRecord({ name: 'vnd.collection.doc+json', file: 'application/vnd.collection.doc+json' }),
+    mediaRecord({ name: 'vnd.sealed.doc', file: 'application/vnd.sealed.doc' }),
+    mediaRecord({ name: 'epub+zip', file: 'application/epub+zip' }),
+  ].join('\n    '),
+  audio: mediaRecord({ name: 'mpeg', file: 'audio/mpeg' }),
+  image: [
+    mediaRecord({ name: 'gif', file: 'image/gif' }),
+    mediaRecord({ name: 'jpeg', file: 'image/jpeg' }),
+    mediaRecord({ name: 'png', file: 'image/png' }),
+    mediaRecord({ name: 'svg+xml', file: 'image/svg+xml' }),
+    mediaRecord({
+      name: 'vnd.sealedmedia.softseal.jpg',
+      file: 'image/vnd.sealedmedia.softseal.jpg',
+    }),
+  ].join('\n    '),
+  text: mediaRecord({ name: 'plain', file: 'text/plain' }),
+});
+
+/** The 35-byte page IANA serves, as HTTP 200 `text/plain`, at the template URL of a registered type with no registration template. */
+export const TEMPLATE_PLACEHOLDER = 'No registration template available.';
+
+/** A real template whose text merely contains the placeholder sentence. */
+export const TEMPLATE_QUOTING_PLACEHOLDER = `Type name: application
+
+Subtype name: vnd.example.quoting
+
+File extension(s): .quo
+
+Additional information: No registration template available.
+`;
 
 /** Layout 1: the labelled template, with the three statements and a contact block. */
 export const TEMPLATE_LABELLED = `Type name: application

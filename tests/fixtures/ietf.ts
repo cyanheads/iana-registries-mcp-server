@@ -4,7 +4,8 @@
  * and group names are invented; every author and address is `Example …` or at
  * `example.org`, so the email-scrubbing tests prove the drop without carrying
  * real data. `doc.json` carries authors, shepherd, and AD with addresses the
- * service must never read.
+ * service must never read. The series edges and the two `contains` pages are
+ * real Datatracker data, which names documents only.
  * @module tests/fixtures/ietf
  */
 
@@ -108,3 +109,100 @@ export function related(...edges: readonly ReturnType<typeof edge>[]) {
     objects: edges,
   };
 }
+
+/** The first `relateddocument` page of a 449-edge result: `edges`, with `meta.next` naming the page after it. */
+export function pagedRelated(...edges: readonly ReturnType<typeof edge>[]) {
+  return {
+    meta: {
+      limit: 100,
+      next: '/api/v1/doc/relateddocument/?format=json&limit=100&offset=100',
+      offset: 0,
+      previous: null,
+      total_count: 449,
+    },
+    objects: edges,
+  };
+}
+
+/**
+ * Real `contains` edges (series → member RFC) from Datatracker's 449-edge
+ * table, captured 2026-10-01; the table matches the RFC Editor index's
+ * `is-also` pairs exactly. BCP 9 has eight members, as many as any series.
+ */
+export const CONTAINS_EDGES: readonly (readonly [series: string, rfc: string])[] = [
+  ['bcp9', 'rfc2026'],
+  ['bcp9', 'rfc5657'],
+  ['bcp9', 'rfc6410'],
+  ['bcp9', 'rfc7100'],
+  ['bcp9', 'rfc7127'],
+  ['bcp9', 'rfc7475'],
+  ['bcp9', 'rfc8789'],
+  ['bcp9', 'rfc9282'],
+  ['bcp14', 'rfc2119'],
+  ['bcp14', 'rfc8174'],
+  ['bcp47', 'rfc4647'],
+  ['bcp47', 'rfc5646'],
+  ['std5', 'rfc1112'],
+  ['std5', 'rfc791'],
+  ['std5', 'rfc792'],
+  ['std5', 'rfc919'],
+  ['std5', 'rfc922'],
+  ['std5', 'rfc950'],
+  ['std7', 'rfc9293'],
+  ['std97', 'rfc9110'],
+  ['fyi36', 'rfc4949'],
+];
+
+/** `relateddocument/?format=json&limit=100&source__name=bcp14&relationship=contains`, verbatim as captured 2026-10-01. */
+export const BCP14_CONTAINS_PAGE = {
+  meta: { limit: 100, next: null, offset: 0, previous: null, total_count: 2 },
+  objects: [
+    {
+      id: 1297039,
+      originaltargetaliasname: null,
+      relationship: '/api/v1/name/docrelationshipname/contains/',
+      resource_uri: '/api/v1/doc/relateddocument/1297039/',
+      source: '/api/v1/doc/document/bcp14/',
+      target: '/api/v1/doc/document/rfc2119/',
+    },
+    {
+      id: 1297312,
+      originaltargetaliasname: null,
+      relationship: '/api/v1/name/docrelationshipname/contains/',
+      resource_uri: '/api/v1/doc/relateddocument/1297312/',
+      source: '/api/v1/doc/document/bcp14/',
+      target: '/api/v1/doc/document/rfc8174/',
+    },
+  ],
+};
+
+/** `relateddocument/?format=json&limit=100&target__name__in=rfc2119,rfc9293,rfc4949&relationship=contains`, verbatim as captured 2026-10-01. */
+export const MEMBERSHIP_PAGE = {
+  meta: { limit: 100, next: null, offset: 0, previous: null, total_count: 3 },
+  objects: [
+    {
+      id: 1297039,
+      originaltargetaliasname: null,
+      relationship: '/api/v1/name/docrelationshipname/contains/',
+      resource_uri: '/api/v1/doc/relateddocument/1297039/',
+      source: '/api/v1/doc/document/bcp14/',
+      target: '/api/v1/doc/document/rfc2119/',
+    },
+    {
+      id: 1297178,
+      originaltargetaliasname: null,
+      relationship: '/api/v1/name/docrelationshipname/contains/',
+      resource_uri: '/api/v1/doc/relateddocument/1297178/',
+      source: '/api/v1/doc/document/fyi36/',
+      target: '/api/v1/doc/document/rfc4949/',
+    },
+    {
+      id: 1297373,
+      originaltargetaliasname: null,
+      relationship: '/api/v1/name/docrelationshipname/contains/',
+      resource_uri: '/api/v1/doc/relateddocument/1297373/',
+      source: '/api/v1/doc/document/std7/',
+      target: '/api/v1/doc/document/rfc9293/',
+    },
+  ],
+};

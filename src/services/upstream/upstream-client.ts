@@ -1,11 +1,11 @@
 /**
  * @fileoverview Plain-fetch boundary for the three keyless upstreams (IANA, RFC
- * Editor, IETF Datatracker): per-host pacers, status accept-lists, a redirect
- * check that keeps every answer on those hosts over https, content-type
- * checks, byte-ceiling body reads, a per-attempt timer, and the retry ladder
- * bounded by the caller's {@link CallBudget} and its per-host request
- * allowance. 304 and 404 are results here, not errors, which is why it calls
- * `fetch` directly instead of `fetchWithTimeout`.
+ * Editor, IETF Datatracker): per-host pacers, status accept-lists, redirects
+ * followed by the client itself and only over https on those hosts,
+ * content-type checks, byte-ceiling body reads, a per-attempt timer, and the
+ * retry ladder bounded by the caller's {@link CallBudget} and its per-host
+ * request allowance. 304 and 404 are results here, not errors, which is why it
+ * calls `fetch` directly instead of `fetchWithTimeout`.
  * @module services/upstream/upstream-client
  */
 
@@ -17,6 +17,7 @@ import {
 } from '@cyanheads/mcp-ts-core/errors';
 import {
   createPacer,
+  defaultIsTransient,
   httpErrorFromResponse,
   type Pacer,
   type PacerOptions,
@@ -43,6 +44,14 @@ export interface UpstreamResponse {
   readonly bytes: number;
   readonly headers: Headers;
   readonly status: number;
+  /** The URL that answered: the request URL, or the last hop of the redirects followed to it. */
+  readonly url: string;
+}
+
+/** A redirect {@link UpstreamClient.get} returns unread, for {@link UpstreamClient.request} to follow. */
+export interface UpstreamRedirect {
+  /** The `Location` header, as sent. */
+  readonly location: string;
 }
 
 /** Options for one single-attempt {@link UpstreamClient.get}. */
@@ -137,6 +146,27 @@ const PROFILES: Readonly<
 /** Longest a call may sit in a host's queue before it is shed (`pacer_shed`). */
 const PACER_MAX_WAIT_MS = 15_000;
 
+/** Statuses that redirect when they carry a `Location`. */
+const REDIRECT_STATUSES: ReadonlySet<number> = new Set([301, 302, 303, 307, 308]);
+
+/** Redirects one read follows; the next one fails the read. */
+const MAX_REDIRECTS = 5;
+
+const OFF_HOST_HINT =
+  'This upstream file redirects off the https hosts this server reads, so calling again fails the same way; open its page on the upstream site instead.';
+const REDIRECT_LIMIT_HINT = `This upstream file redirects more than ${MAX_REDIRECTS} times, so calling again fails the same way; open its page on the upstream site instead.`;
+const OVER_CEILING_HINT =
+  'This upstream file is larger than this server reads, so calling again fails the same way; open its page on the upstream site instead.';
+
+/**
+ * Unreadable answers that come back the same on every attempt within a call but
+ * can clear before a later one: a wrong content type, typically an error or
+ * maintenance page served as 200. {@link UpstreamClient.request} fails on the
+ * first and leaves `retryable` off the wire, so the caller is still told to
+ * retry later.
+ */
+const sameWithinCall = new WeakSet<Error>();
+
 const CONTENT_TYPES: Readonly<Record<ExpectedContent, readonly string[]>> = {
   xml: ['application/xml', 'text/xml'],
   text: ['text/plain'],
@@ -180,39 +210,58 @@ export class UpstreamClient implements Disposable {
 
   /**
    * One paced, retried read inside the caller's budget:
-   * `withRetry(attempt => pacer.run(() => get + parse))`. Pacer queue time, every
-   * attempt, and every backoff draw on `budget`; expiry is a `Timeout` with
-   * `reason: 'retry_deadline_exceeded'`, a full host queue is `pacer_shed`. Each
-   * attempt takes one request from the budget's allowance for the host before it
-   * queues; with none left the read fails `RateLimited` with
-   * `reason: 'request_limit'`, unretried. Every failure, an unconfigured host
-   * included, is a rejection.
+   * `withRetry(attempt => each hop: pacer.run(() => get, + parse at the last))`.
+   * A redirect is followed hop by hop, each hop a request of its own: it takes
+   * one request from the budget's allowance for its host, waits its turn on that
+   * host's pacer, and gets its own per-attempt timer under the ladder deadline.
+   * Pacer queue time, every hop, and every backoff draw on `budget`; expiry is a
+   * `Timeout` with `reason: 'retry_deadline_exceeded'`, a full host queue is
+   * `pacer_shed`. With no request left for a host the read fails `RateLimited`
+   * with `reason: 'request_limit'`, unretried. A redirect off the upstream hosts
+   * or past {@link MAX_REDIRECTS}, a wrong content type, and a body over its
+   * ceiling fail unreadable on the first answer, since every attempt in the call
+   * would get the same one. Every failure, an unconfigured host included, is a
+   * rejection.
    */
   async request<T>(url: string, options: RequestOptions<T>): Promise<T> {
     const { budget, parse, profile: profileName, operation, ...get } = options;
     const host = hostOf(url);
-    const pacer = this.#pacers[host];
     const profile = PROFILES[profileName];
     const remaining = budget.remainingMs();
     if (remaining <= 0) throw budgetExceeded(budget, operation);
+    const reason = get.unreadableReason ?? 'upstream_unreadable';
 
     return await withRetry(
-      (attempt) => {
-        takeRequest(budget, host, url, operation);
-        return pacer.run(
-          async (signal) =>
-            parse(
-              await this.get(url, {
+      async (attempt) => {
+        let hop = url;
+        for (let redirects = 0; ; redirects++) {
+          const hopHost = hostOf(hop);
+          takeRequest(budget, hopHost, hop, operation);
+          const answer = await this.#pacers[hopHost].run(
+            async (signal) => {
+              const response = await this.get(hop, {
                 ...get,
                 signal,
                 timeoutMs: Math.min(profile.attemptMs, attempt.remainingMs),
-              }),
-            ),
-          {
-            signal: attempt.signal,
-            maxWaitMs: Math.min(PACER_MAX_WAIT_MS, attempt.remainingMs),
-          },
-        );
+              });
+              return 'location' in response ? response : { value: parse(response) };
+            },
+            {
+              signal: attempt.signal,
+              maxWaitMs: Math.min(PACER_MAX_WAIT_MS, attempt.remainingMs),
+            },
+          );
+          if ('value' in answer) return answer.value;
+          if (redirects === MAX_REDIRECTS) {
+            throw repeatingFailure(
+              `${url} redirected more than ${MAX_REDIRECTS} times; this server follows at most ${MAX_REDIRECTS}.`,
+              { host: new URL(url).hostname, url, maxRedirects: MAX_REDIRECTS },
+              reason,
+              REDIRECT_LIMIT_HINT,
+            );
+          }
+          hop = nextHop(hop, answer.location, reason);
+        }
       },
       {
         operation,
@@ -222,20 +271,25 @@ export class UpstreamClient implements Disposable {
         baseDelayMs:
           host === 'datatracker' && profileName === 'small' ? 1_000 : profile.baseDelayMs,
         deadlineMs: Math.min(profile.deadlineMs, remaining),
+        isTransient: (error) =>
+          !(error instanceof Error && sameWithinCall.has(error)) && defaultIsTransient(error),
       },
     );
   }
 
   /**
-   * One attempt: fetch, status and content-type checks, byte-capped body read.
-   * Redirects are followed, but an answer whose final URL is not https on one of
-   * the three upstream hosts is unreadable, whatever its status.
+   * One request: fetch, status and content-type checks, byte-capped body read.
+   * `fetch` follows no redirect: a 301, 302, 303, 307, or 308 carrying a
+   * `Location` is returned unread as an {@link UpstreamRedirect}, for
+   * {@link request} to follow.
    * A status in `accept` is returned; 408/429/5xx throw the classified HTTP error
-   * (transient, `Retry-After` honored); any other status throws unreadable. When
-   * the per-attempt timer fires the throw is a transient `Timeout`; any other
-   * abort propagates unchanged.
+   * (transient, `Retry-After` honored); any other status throws unreadable. A
+   * wrong content type throws unreadable that {@link request} does not retry; a
+   * body over `maxBytes` throws unreadable with `retryable: false` and a hint
+   * that calling again fails the same way. When the per-attempt timer fires the
+   * throw is a transient `Timeout`; any other abort propagates unchanged.
    */
-  async get(url: string, options: GetOptions): Promise<UpstreamResponse> {
+  async get(url: string, options: GetOptions): Promise<UpstreamResponse | UpstreamRedirect> {
     const host = new URL(url).hostname;
     const timer = new AbortController();
     const handle = setTimeout(() => timer.abort(), options.timeoutMs);
@@ -247,7 +301,7 @@ export class UpstreamClient implements Disposable {
       try {
         response = await this.#fetch(url, {
           headers: { 'User-Agent': this.#userAgent, ...options.headers },
-          redirect: 'follow',
+          redirect: 'manual',
           signal,
         });
       } catch (error) {
@@ -259,40 +313,38 @@ export class UpstreamClient implements Disposable {
         );
       }
 
-      if (response.redirected && !isUpstreamUrl(response.url)) {
-        await discard(response);
-        const target = URL.parse(response.url)?.origin ?? 'an unparseable URL';
-        throw upstreamUnreadable(
-          `${host} redirected ${url} to ${target}, outside the https upstream hosts this server reads.`,
-          { host, url, redirectedTo: target },
-          { reason },
-        );
-      }
-
       const { status } = response;
+      const location = redirectLocation(response);
+      if (location !== undefined) {
+        await discard(response);
+        return { location };
+      }
       if (options.accept.includes(status)) {
         if (status !== 200) {
           await discard(response);
-          return { status, headers: response.headers, body: '', bytes: 0 };
+          return { status, headers: response.headers, body: '', bytes: 0, url };
         }
         const mediaType =
           (response.headers.get('content-type') ?? '').split(';')[0]?.trim().toLowerCase() ?? '';
         if (!CONTENT_TYPES[options.expect].includes(mediaType)) {
           await discard(response);
-          throw upstreamUnreadable(
+          const wrongType = upstreamUnreadable(
             `${host} answered with ${mediaType || 'no content type'} where ${options.expect} was expected.`,
             { host, url, contentType: mediaType },
             { reason },
           );
+          sameWithinCall.add(wrongType);
+          throw wrongType;
         }
         const { text, bytes } = await readBody(response, options.maxBytes, () =>
-          upstreamUnreadable(
+          repeatingFailure(
             `${host} sent more than ${options.maxBytes} bytes for ${url}.`,
             { host, url, maxBytes: options.maxBytes },
-            { reason },
+            reason,
+            OVER_CEILING_HINT,
           ),
         );
-        return { status, headers: response.headers, body: text, bytes };
+        return { status, headers: response.headers, body: text, bytes, url };
       }
 
       if (status === 408 || status === 429 || status >= 500) {
@@ -338,10 +390,62 @@ function hostOf(url: string): UpstreamHost {
   return host;
 }
 
-/** True when `href` is https on one of {@link HOSTS}: where a followed redirect may land. */
-function isUpstreamUrl(href: string): boolean {
-  const target = URL.parse(href);
-  return target?.protocol === 'https:' && HOSTS.has(target.hostname);
+/** The `Location` of a redirect status, or `undefined` for any other answer. */
+function redirectLocation(response: Pick<Response, 'headers' | 'status'>): string | undefined {
+  return REDIRECT_STATUSES.has(response.status)
+    ? (response.headers.get('location') ?? undefined)
+    : undefined;
+}
+
+/**
+ * The URL a redirect from `from` continues to: `location` resolved against
+ * `from`, on one of {@link HOSTS}, with no username or password, `http:`
+ * upgraded to `https:` so no plain-http request is ever sent, and on the https
+ * default port once upgraded. Any other target is refused before a request.
+ */
+function nextHop(from: string, location: string, reason: string): string {
+  const target = URL.parse(location, from);
+  if (target && HOSTS.has(target.hostname) && !target.username && !target.password) {
+    const hop = new URL(target);
+    if (hop.protocol === 'http:') hop.protocol = 'https:';
+    if (hop.protocol === 'https:' && hop.port === '') return hop.href;
+  }
+  const shown = refusedTarget(target);
+  const host = new URL(from).hostname;
+  throw repeatingFailure(
+    `${host} redirected ${from} to ${shown}, outside the https upstream hosts this server reads.`,
+    { host, url: from, redirectedTo: shown },
+    reason,
+    OFF_HOST_HINT,
+  );
+}
+
+/**
+ * A refused target as its error names it: its origin, which never carries a
+ * username or password. A target on one of {@link HOSTS} refused for its
+ * credentials would show an upstream origin, so it is named by the reason.
+ */
+function refusedTarget(target: URL | null): string {
+  if (!target) return 'an unparseable URL';
+  if (target.origin === 'null') return `a ${target.protocol} URL`;
+  if (HOSTS.has(target.hostname) && (target.username || target.password)) {
+    return 'a URL with a username or password';
+  }
+  return target.origin;
+}
+
+/**
+ * An answer every later call gets too (a redirect this client will not follow,
+ * a body over its ceiling): unreadable and `retryable: false`, with a hint
+ * saying so.
+ */
+function repeatingFailure(
+  message: string,
+  data: Record<string, unknown>,
+  reason: string,
+  hint: string,
+) {
+  return upstreamUnreadable(message, { ...data, retryable: false, recovery: { hint } }, { reason });
 }
 
 /**

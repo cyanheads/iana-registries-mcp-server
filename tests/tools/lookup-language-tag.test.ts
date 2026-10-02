@@ -913,7 +913,7 @@ describeFailureContract({
   recovery:
     'The IANA language subtag registry could not be read; retry iana_lookup_language_tag shortly.',
   unreadable: [
-    { label: 'an HTML page served as 200', attempts: 3, response: () => htmlResponse('<html/>') },
+    { label: 'an HTML page served as 200', attempts: 1, response: () => htmlResponse('<html/>') },
     {
       label: 'a text body with no records',
       attempts: 3,

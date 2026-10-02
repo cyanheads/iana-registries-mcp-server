@@ -757,7 +757,7 @@ describeFailureContract({
   reason: 'upstream_unreadable',
   recovery: 'The IANA enterprise number file could not be read; retry iana_lookup_pen in a minute.',
   unreadable: [
-    { label: 'an HTML page served as 200', attempts: 3, response: () => htmlResponse('<html/>') },
+    { label: 'an HTML page served as 200', attempts: 1, response: () => htmlResponse('<html/>') },
     {
       label: 'a text body with no record header',
       attempts: 3,

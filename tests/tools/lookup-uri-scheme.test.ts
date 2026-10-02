@@ -494,7 +494,7 @@ describeFailureContract({
   reason: 'upstream_unreadable',
   recovery: 'The IANA URI scheme registry could not be read; retry iana_lookup_uri_scheme shortly.',
   unreadable: [
-    { label: 'an HTML page served as 200', attempts: 3, response: () => htmlResponse('<html/>') },
+    { label: 'an HTML page served as 200', attempts: 1, response: () => htmlResponse('<html/>') },
     {
       label: 'a body with no registry root',
       attempts: 3,

@@ -528,7 +528,7 @@ describeFailureContract({
   recovery:
     'The IANA HTTP status registry could not be read; retry iana_lookup_http_status shortly.',
   unreadable: [
-    { label: 'an HTML page served as 200', attempts: 3, response: () => htmlResponse('<html/>') },
+    { label: 'an HTML page served as 200', attempts: 1, response: () => htmlResponse('<html/>') },
     {
       label: 'a body with no registry root',
       attempts: 3,

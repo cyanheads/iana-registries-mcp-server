@@ -5,9 +5,10 @@
  * `div.reg-title` link to `/assignments/<id>(#<sub>)`, defining-document links
  * (`a[data-doc-name]`), and `span.iana-protocol-comment` procedure text whose
  * nested `span.reg-expert` elements (designated-expert names) are removed before
- * any text is read. A parse under the floor is a layout change, never a short
- * index. Elements are found with `indexOf`, so a parse is linear in the page: a
- * regex over it would retry every unclosed tag against the rest of the page.
+ * any text is read. A pair listed under several categories becomes one entry.
+ * A parse under the floor is a layout change, never a short index. Elements are
+ * found with `indexOf`, so a parse is linear in the page: a regex over it would
+ * retry every unclosed tag against the rest of the page.
  * @module services/registry/protocol-index-parser
  */
 
@@ -205,7 +206,10 @@ function registrationProcedure(docHtml: string): string | undefined {
   return parts.length > 0 ? scrubEmails(parts.join('; ')) : undefined;
 }
 
-function parseEntry(row: string, category: string): IndexEntry | undefined {
+/** One listing of a registry/sub-registry pair: an entry before its category and search text are set. */
+type Listing = Omit<IndexEntry, 'category' | 'searchText'>;
+
+function parseListing(row: string): Listing | undefined {
   const title = titleLink(row);
   if (!title) return;
   const href = attributesOf(title.attributes).get('href') ?? '';
@@ -217,24 +221,27 @@ function parseEntry(row: string, category: string): IndexEntry | undefined {
 
   const docStart = row.indexOf('class="reg-doc"');
   const docHtml = docStart === -1 ? '' : row.slice(docStart);
-  const entryTitle = scrubEmails(textOf(title.content));
   const procedure = registrationProcedure(docHtml);
   return {
     registryId,
-    title: entryTitle,
-    category,
+    title: scrubEmails(textOf(title.content)),
     definingDocuments: definingDocuments(docHtml),
     pageUrl: `${IANA}/assignments/${registryId}${subregistryId ? `#${subregistryId}` : ''}`,
     xmlUrl: `${IANA}/assignments/${registryId}/${registryId}.xml`,
-    searchText: toSearchText(entryTitle, category, registryId, subregistryId),
     ...(subregistryId ? { subregistryId } : {}),
     ...(procedure ? { registrationProcedure: procedure } : {}),
   };
 }
 
-/** Parses the index page into entries; the floor is checked by {@link indexFloorError}. */
+/**
+ * Parses the index page into entries; the floor is checked by
+ * {@link indexFloorError}. A registry/sub-registry pair listed more than once
+ * is one entry at its first position, showing its first listing: its
+ * categories are joined with `"; "`, and every distinct title and category it
+ * is listed under is searchable.
+ */
 export function parseProtocolIndex(html: string): ProtocolIndex {
-  const entries: IndexEntry[] = [];
+  const byPair = new Map<string, { categories: string[]; listing: Listing; titles: string[] }>();
   let category = '';
   let categoryCount = 0;
   for (const [attributes, row] of rows(html)) {
@@ -244,9 +251,25 @@ export function parseProtocolIndex(html: string): ProtocolIndex {
       continue;
     }
     if (!row.includes('class="reg-title"')) continue;
-    const entry = parseEntry(row, category);
-    if (entry) entries.push(entry);
+    const listing = parseListing(row);
+    if (!listing) continue;
+    const pair = `${listing.registryId}#${listing.subregistryId ?? ''}`;
+    const listed = byPair.get(pair);
+    if (!listed) {
+      byPair.set(pair, { listing, categories: [category], titles: [listing.title] });
+      continue;
+    }
+    if (!listed.categories.includes(category)) listed.categories.push(category);
+    if (!listed.titles.includes(listing.title)) listed.titles.push(listing.title);
   }
+  const entries = [...byPair.values()].map(({ listing, categories, titles }): IndexEntry => {
+    const joined = categories.join('; ');
+    return {
+      ...listing,
+      category: joined,
+      searchText: toSearchText(...titles, joined, listing.registryId, listing.subregistryId),
+    };
+  });
   const registryIds = new Map<string, string>();
   for (const entry of entries) registryIds.set(entry.registryId.toLowerCase(), entry.registryId);
   return { entries, registryIds, categoryCount };

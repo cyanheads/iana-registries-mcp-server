@@ -4,10 +4,15 @@
  * scrubbing of title and authors), the Datatracker `doc.json` reads (RFC
  * tracking, `findDraft` with its `-NN` revision strip after a 404, a draft
  * missing `rev`, `state`, or `time` as unreadable), `getDraftRelations`
- * filtering edges by slug and name, malformed and mis-shaped JSON as
- * `upstream_unreadable`, and `relatedDocumentsUrl` serializing allow-listed keys
- * only. Upstream I/O is a `createFetchMock` fake; every author and address in a
- * fixture is invented.
+ * filtering edges by slug and name, the series reads (`getRfcSeries` for every
+ * RFC in one `target__name__in` query, `getSeriesMembers` sorted by number),
+ * each read naming its own operation when refused at the request limit,
+ * malformed and mis-shaped JSON as `upstream_unreadable` (a `relateddocument`
+ * page with more pages after it included), zero-padded ids read in linear
+ * time, and
+ * `relatedDocumentsUrl` serializing allow-listed keys only. Upstream I/O is a
+ * `createFetchMock` fake; every author and address in a fixture is invented,
+ * and the two `contains` pages are verbatim Datatracker captures.
  */
 
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
@@ -26,10 +31,14 @@ import {
   rfcJsonUrl,
   rfcPageUrl,
 } from '@/services/ietf/ietf-doc-service.js';
+import type { CallBudget } from '@/services/upstream/call-budget.js';
 import {
+  BCP14_CONTAINS_PAGE,
   DOC_PERSON_MARKERS,
   draftDocJson,
   edge,
+  MEMBERSHIP_PAGE,
+  pagedRelated,
   related,
   rfcDocJson,
   rfcJson,
@@ -110,6 +119,39 @@ async function value<T>(call: () => Promise<T>): Promise<T> {
   return outcome.value as T;
 }
 
+/** Wall-clock milliseconds `call` takes to settle; `performance.now()` is faked along with the timers. */
+async function realMs(call: () => Promise<unknown>): Promise<number> {
+  const start = vi.getRealSystemTime();
+  await value(call);
+  return vi.getRealSystemTime() - start;
+}
+
+/**
+ * The fastest of three runs of `run(n)` at each of 5k, 20k, and 80k characters,
+ * for a growth check: a linear parse grows about 16× from 5k to 80k, a
+ * quadratic one about 256×.
+ */
+async function timings(run: (n: number) => Promise<unknown>) {
+  const fastest = async (n: number) => {
+    let best = Number.POSITIVE_INFINITY;
+    for (let attempt = 0; attempt < 3; attempt++) best = Math.min(best, await realMs(() => run(n)));
+    return best;
+  };
+  return { t5k: await fastest(5_000), t20k: await fastest(20_000), t80k: await fastest(80_000) };
+}
+
+/** Linear growth from 5k to 80k characters, and a bound no quadratic parse meets at 80k. */
+function expectLinear({ t5k, t20k, t80k }: Awaited<ReturnType<typeof timings>>): void {
+  const measured = `5k ${t5k} ms, 20k ${t20k} ms, 80k ${t80k} ms`;
+  expect(t80k / Math.max(t5k, 1), measured).toBeLessThan(64);
+  expect(t80k, measured).toBeLessThan(500);
+}
+
+/** `budget` with no Datatracker requests left, so the next Datatracker read is refused unsent. */
+function exhausted(budget: CallBudget): CallBudget {
+  return { ...budget, requests: { datatracker: 0 } };
+}
+
 /** The rejection of `call`, failing the test when it resolved. */
 async function rejection(call: () => Promise<unknown>): Promise<ReturnType<typeof asMcpError>> {
   const outcome = await settle(call);
@@ -151,13 +193,14 @@ describe('relatedDocumentsUrl', () => {
     const url = relatedDocumentsUrl({
       relationship: 'replaces',
       unknown_filter: 'x',
+      target__name__in: 'rfc1,rfc2',
       target__name: 'draft-a',
       source__name: 'draft-b',
       id__gt: '5',
       relationship__in: 'replaces,became_rfc',
     } as never);
     expect(url).toBe(
-      `${BASE}format=json&limit=100&source__name=draft-b&target__name=draft-a&relationship=replaces&relationship__in=replaces%2Cbecame_rfc`,
+      `${BASE}format=json&limit=100&source__name=draft-b&target__name=draft-a&target__name__in=rfc1%2Crfc2&relationship=replaces&relationship__in=replaces%2Cbecame_rfc`,
     );
     expect(url).not.toContain('unknown_filter');
     expect(url).not.toContain('id__gt');
@@ -177,6 +220,7 @@ describe('relatedDocumentsUrl', () => {
       'limit',
       'source__name',
       'target__name',
+      'target__name__in',
       'relationship',
       'relationship__in',
     ]);
@@ -202,7 +246,6 @@ describe('IetfDocService.getRfc', () => {
       obsoletedBy: [],
       updates: ['RFC 5234'],
       updatedBy: ['RFC 8002'],
-      seeAlso: ['STD0097', 'BCP0047'],
       doi: '10.17487/RFC8001',
       errataUrl: 'https://www.rfc-editor.org/errata/rfc8001',
       draftName: 'draft-example-wg-topic-12',
@@ -222,6 +265,16 @@ describe('IetfDocService.getRfc', () => {
     const s = setup();
     s.serve({ [URL_8001]: () => jsonResponse(rfcJson(8001, { obsoletes: [id] })) });
     expect((await value(() => s.service.getRfc(8001, s.budget())))?.obsoletes).toEqual([expected]);
+  });
+
+  it('reads a relation id with a long zero run in linear time', { timeout: 60_000 }, async () => {
+    const s = setup();
+    const times = await timings((n) => {
+      const id = `rfc${'0'.repeat(n)}x`;
+      s.serve({ [URL_8001]: () => jsonResponse(rfcJson(8001, { obsoletes: [id] })) });
+      return s.service.getRfc(8001, s.budget());
+    });
+    expectLinear(times);
   });
 
   it.each([
@@ -271,7 +324,6 @@ describe('IetfDocService.getRfc', () => {
             obsoleted_by: undefined,
             updates: null,
             updated_by: undefined,
-            see_also: null,
           }),
         ),
     });
@@ -281,8 +333,13 @@ describe('IetfDocService.getRfc', () => {
       obsoletedBy: [],
       updates: [],
       updatedBy: [],
-      seeAlso: [],
     });
+  });
+
+  it('never carries see_also, which the RFC Editor sends empty on every RFC', async () => {
+    const s = setup();
+    s.serve({ [URL_8001]: () => jsonResponse(rfcJson(8001, { see_also: ['STD0097'] })) });
+    expect(await value(() => s.service.getRfc(8001, s.budget()))).not.toHaveProperty('seeAlso');
   });
 
   it('scrubs email addresses from the title and the authors', async () => {
@@ -333,11 +390,13 @@ describe('IetfDocService.getRfc', () => {
     expect(error.data).toMatchObject({ reason: 'upstream_unreadable', status: 403 });
   });
 
-  it('rejects an HTML page served as 200', async () => {
+  it('rejects an HTML page served as 200 after one fetch, stating no retryable', async () => {
     const s = setup();
     s.serve({ [URL_8001]: () => htmlResponse('<html>maintenance</html>') });
     const error = await rejection(() => s.service.getRfc(8001, s.budget()));
     expect(error.data).toMatchObject({ reason: 'upstream_unreadable' });
+    expect(error.data).not.toHaveProperty('retryable');
+    expect(s.fetches()).toBe(1);
   });
 
   it('rejects malformed JSON as upstream_unreadable, retried inside the ladder', async () => {
@@ -381,7 +440,7 @@ describe('IetfDocService.getRfc', () => {
     expect(error.data).toMatchObject({ reason: 'upstream_unreadable' });
   });
 
-  it('rejects a body over the 256 KiB ceiling', async () => {
+  it('rejects a body over the 256 KiB ceiling after one fetch, not retryable', async () => {
     const s = setup();
     s.serve({
       [URL_8001]: () =>
@@ -391,7 +450,9 @@ describe('IetfDocService.getRfc', () => {
     expect(error.data).toMatchObject({
       reason: 'upstream_unreadable',
       maxBytes: RFC_JSON_MAX_BYTES,
+      retryable: false,
     });
+    expect(s.fetches()).toBe(1);
   });
 
   it('rejects as a Timeout inside the call budget when the upstream never answers', async () => {
@@ -785,6 +846,17 @@ describe('IetfDocService.getDraftRelations', () => {
     expect(error.data).toMatchObject({ reason: 'upstream_unreadable', status: 404 });
   });
 
+  it('rejects a page that says more edges follow: a partial page would drop relations', async () => {
+    const s = setup();
+    s.serve({
+      [OUTGOING_URL]: () =>
+        jsonResponse(pagedRelated(edge('replaces', DRAFT, 'draft-example-wg-ancient'))),
+      [INCOMING_URL]: () => jsonResponse(related()),
+    });
+    const error = await rejection(() => s.service.getDraftRelations(DRAFT, s.budget()));
+    expect(error.data).toMatchObject({ reason: 'upstream_unreadable', url: OUTGOING_URL });
+  });
+
   it.each([
     [
       'malformed JSON',
@@ -804,6 +876,232 @@ describe('IetfDocService.getDraftRelations', () => {
     s.serve({ [OUTGOING_URL]: answer, [INCOMING_URL]: () => jsonResponse(related()) });
     const error = await rejection(() => s.service.getDraftRelations(DRAFT, s.budget()));
     expect(error.data).toMatchObject({ reason: 'upstream_unreadable' });
+  });
+
+  it('names getDraftRelations as the operation of a read refused at the request limit', async () => {
+    const s = setup();
+    const error = await rejection(() => s.service.getDraftRelations(DRAFT, exhausted(s.budget())));
+    expect(error.message).toBe(
+      'IetfDocService.getDraftRelations was not sent: this call has started every request to datatracker.ietf.org it may.',
+    );
+    expect(error.data).toMatchObject({ reason: 'request_limit' });
+    expect(s.fetches()).toBe(0);
+  });
+});
+
+describe('IetfDocService.getRfcSeries', () => {
+  const MEMBERSHIP_URL = `${DATATRACKER_ORIGIN}/api/v1/doc/relateddocument/?format=json&limit=100&target__name__in=rfc2119%2Crfc9293%2Crfc4949&relationship=contains`;
+  const NON_MEMBERS_URL = `${DATATRACKER_ORIGIN}/api/v1/doc/relateddocument/?format=json&limit=100&target__name__in=rfc7231%2Crfc793&relationship=contains`;
+  const RFC_8001_URL = `${DATATRACKER_ORIGIN}/api/v1/doc/relateddocument/?format=json&limit=100&target__name__in=rfc8001&relationship=contains`;
+
+  it("reads every RFC's series from one allow-listed query, as series ids", async () => {
+    const s = setup();
+    s.serve({ [MEMBERSHIP_URL]: () => jsonResponse(MEMBERSHIP_PAGE) });
+    const series = await value(() => s.service.getRfcSeries([2119, 9293, 4949], s.budget()));
+    expect(series).toEqual(
+      new Map([
+        [2119, ['BCP 14']],
+        [9293, ['STD 7']],
+        [4949, ['FYI 36']],
+      ]),
+    );
+    expect(s.urls()).toEqual([MEMBERSHIP_URL]);
+  });
+
+  it('leaves out an RFC that belongs to no series', async () => {
+    const s = setup();
+    s.serve({ [NON_MEMBERS_URL]: () => jsonResponse(related()) });
+    const series = await value(() => s.service.getRfcSeries([7231, 793], s.budget()));
+    expect(series.size).toBe(0);
+    expect(s.urls()).toEqual([NON_MEMBERS_URL]);
+  });
+
+  it('drops edges of another relationship or another target, and sorts an RFC in two series', async () => {
+    const s = setup();
+    s.serve({
+      [RFC_8001_URL]: () =>
+        jsonResponse(
+          related(
+            edge('contains', 'std97', 'rfc8001'),
+            edge('refnorm', 'draft-example-wg-topic', 'rfc8001'),
+            edge('contains', 'bcp14', 'rfc2119'),
+            edge('contains', 'bcp47', 'rfc8001'),
+          ),
+        ),
+    });
+    const series = await value(() => s.service.getRfcSeries([8001], s.budget()));
+    expect(series).toEqual(new Map([[8001, ['BCP 47', 'STD 97']]]));
+  });
+
+  it('reads a zero-padded series name as its series id, and any other name verbatim', async () => {
+    const s = setup();
+    s.serve({
+      [RFC_8001_URL]: () =>
+        jsonResponse(
+          related(
+            edge('contains', 'bcp0014', 'rfc8001'),
+            edge('contains', 'STD097', 'rfc8001'),
+            edge('contains', 'ien137', 'rfc8001'),
+          ),
+        ),
+    });
+    const series = await value(() => s.service.getRfcSeries([8001], s.budget()));
+    expect(series).toEqual(new Map([[8001, ['BCP 14', 'ien137', 'STD 97']]]));
+  });
+
+  it('reads a series name with a long zero run in linear time', { timeout: 60_000 }, async () => {
+    const s = setup();
+    const times = await timings((n) => {
+      const name = `bcp${'0'.repeat(n)}x`;
+      s.serve({ [RFC_8001_URL]: () => jsonResponse(related(edge('contains', name, 'rfc8001'))) });
+      return s.service.getRfcSeries([8001], s.budget());
+    });
+    expectLinear(times);
+  });
+
+  it('rejects a failed read rather than answering that no RFC is in a series', async () => {
+    const s = setup();
+    s.serve({ [RFC_8001_URL]: () => statusResponse(503) });
+    const error = await rejection(() => s.service.getRfcSeries([8001], s.budget()));
+    expect(error.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+    expect(s.fetches()).toBe(3);
+  });
+
+  it('rejects a page with no objects array as upstream_unreadable', async () => {
+    const s = setup();
+    s.serve({ [RFC_8001_URL]: () => jsonResponse({ meta: {} }) });
+    const error = await rejection(() => s.service.getRfcSeries([8001], s.budget()));
+    expect(error.data).toMatchObject({ reason: 'upstream_unreadable' });
+  });
+
+  it('rejects a page that says more edges follow, rather than reading its RFCs as in no series', async () => {
+    const s = setup();
+    s.serve({
+      [RFC_8001_URL]: () => jsonResponse(pagedRelated(edge('contains', 'bcp9', 'rfc2026'))),
+    });
+    const error = await rejection(() => s.service.getRfcSeries([8001], s.budget()));
+    expect(error.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+    expect(error.data).toMatchObject({ reason: 'upstream_unreadable', url: RFC_8001_URL });
+    expect(error.message).toContain(
+      `datatracker.ietf.org sent a page of ${RFC_8001_URL} with more pages after it; one page alone would drop edges.`,
+    );
+  });
+
+  it.each([
+    ['no meta', { objects: [] }],
+    ['a meta with no next', { meta: { limit: 100, total_count: 0 }, objects: [] }],
+  ])('rejects a page with %s as upstream_unreadable', async (_label, body) => {
+    const s = setup();
+    s.serve({ [RFC_8001_URL]: () => jsonResponse(body) });
+    const error = await rejection(() => s.service.getRfcSeries([8001], s.budget()));
+    expect(error.data).toMatchObject({ reason: 'upstream_unreadable' });
+  });
+
+  it('names getRfcSeries as the operation of a read refused at the request limit', async () => {
+    const s = setup();
+    const error = await rejection(() => s.service.getRfcSeries([8001], exhausted(s.budget())));
+    expect(error.message).toMatch(/^IetfDocService\.getRfcSeries was not sent/);
+    expect(s.fetches()).toBe(0);
+  });
+});
+
+describe('IetfDocService.getSeriesMembers', () => {
+  const seriesUrl = (name: string) =>
+    `${DATATRACKER_ORIGIN}/api/v1/doc/relateddocument/?format=json&limit=100&source__name=${name}&relationship=contains`;
+
+  it('reads the member RFCs from one allow-listed query, as RFC ids', async () => {
+    const s = setup();
+    s.serve({ [seriesUrl('bcp14')]: () => jsonResponse(BCP14_CONTAINS_PAGE) });
+    expect(await value(() => s.service.getSeriesMembers('bcp14', s.budget()))).toEqual([
+      'RFC 2119',
+      'RFC 8174',
+    ]);
+    expect(s.urls()).toEqual([seriesUrl('bcp14')]);
+  });
+
+  it('lists members in ascending number order, whatever order Datatracker sends', async () => {
+    const s = setup();
+    s.serve({
+      [seriesUrl('std5')]: () =>
+        jsonResponse(
+          related(
+            edge('contains', 'std5', 'rfc1112'),
+            edge('contains', 'std5', 'rfc950'),
+            edge('contains', 'std5', 'rfc791'),
+            edge('contains', 'std5', 'rfc922'),
+            edge('contains', 'std5', 'rfc792'),
+            edge('contains', 'std5', 'rfc919'),
+          ),
+        ),
+    });
+    expect(await value(() => s.service.getSeriesMembers('std5', s.budget()))).toEqual([
+      'RFC 791',
+      'RFC 792',
+      'RFC 919',
+      'RFC 922',
+      'RFC 950',
+      'RFC 1112',
+    ]);
+  });
+
+  it('answers an empty list for a series with no members', async () => {
+    const s = setup();
+    s.serve({ [seriesUrl('bcp9999')]: () => jsonResponse(related()) });
+    expect(await value(() => s.service.getSeriesMembers('bcp9999', s.budget()))).toEqual([]);
+  });
+
+  it('drops edges of another relationship or another source', async () => {
+    const s = setup();
+    s.serve({
+      [seriesUrl('bcp14')]: () =>
+        jsonResponse(
+          related(
+            edge('contains', 'bcp14', 'rfc8174'),
+            edge('contains', 'bcp47', 'rfc5646'),
+            edge('updates', 'bcp14', 'rfc9999'),
+          ),
+        ),
+    });
+    expect(await value(() => s.service.getSeriesMembers('bcp14', s.budget()))).toEqual([
+      'RFC 8174',
+    ]);
+  });
+
+  it('reads a zero-padded member as its RFC id', async () => {
+    const s = setup();
+    s.serve({
+      [seriesUrl('bcp14')]: () =>
+        jsonResponse(
+          related(edge('contains', 'bcp14', 'rfc08174'), edge('contains', 'bcp14', 'RFC2119')),
+        ),
+    });
+    expect(await value(() => s.service.getSeriesMembers('bcp14', s.budget()))).toEqual([
+      'RFC 2119',
+      'RFC 8174',
+    ]);
+  });
+
+  it('rejects a failed read rather than answering an empty series', async () => {
+    const s = setup();
+    s.serve({ [seriesUrl('bcp14')]: () => statusResponse(503) });
+    const error = await rejection(() => s.service.getSeriesMembers('bcp14', s.budget()));
+    expect(error.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+  });
+
+  it('rejects a page that says more edges follow, rather than answering a short member list', async () => {
+    const s = setup();
+    s.serve({
+      [seriesUrl('bcp14')]: () => jsonResponse(pagedRelated(edge('contains', 'bcp14', 'rfc2119'))),
+    });
+    const error = await rejection(() => s.service.getSeriesMembers('bcp14', s.budget()));
+    expect(error.data).toMatchObject({ reason: 'upstream_unreadable', url: seriesUrl('bcp14') });
+  });
+
+  it('names getSeriesMembers as the operation of a read refused at the request limit', async () => {
+    const s = setup();
+    const error = await rejection(() => s.service.getSeriesMembers('bcp14', exhausted(s.budget())));
+    expect(error.message).toMatch(/^IetfDocService\.getSeriesMembers was not sent/);
+    expect(s.fetches()).toBe(0);
   });
 });
 

@@ -5,7 +5,9 @@
  * (`vnd.gmx - DEPRECATED`, `javascript (OBSOLETED in favor of text/javascript)`),
  * parsed here into status, note, and replacement. An exact lookup also reads the
  * registration template through `MediaTemplateReader`, which returns three
- * labelled statements and nothing else.
+ * labelled statements and nothing else, or `available: false` when IANA
+ * publishes no template for the type. Keyword mode never reads templates, so it
+ * cannot match file extensions; a one-word keyword shaped like one says so.
  * @module mcp-server/tools/definitions/lookup-media-type
  */
 
@@ -85,7 +87,34 @@ const DOCUMENT_REFERENCE = /^(?:rfc|bcp|std)\d*$/i;
 /** Characters kept raw in a template URL path segment; everything else is percent-encoded. */
 const PATH_UNSAFE = /[^A-Za-z0-9!$&'()*+,;=:@._~-]/g;
 
+/**
+ * A keyword shaped like a file extension: one word of 2–5 letters or digits,
+ * after an optional "*" and ".". The capture drops the "*", which would pair
+ * with the one the miss text echoes into markdown emphasis.
+ */
+const EXTENSION_SHAPED = /^\*?(\.?[a-z0-9]{2,5})$/i;
+
 type MediaStatus = 'current' | 'deprecated' | 'obsoleted';
+
+/** A type-mode row's `template`: how the read went and the statements it kept. */
+const TemplateSchema = z.object({
+  fetched: z.boolean().describe('False when the template could not be read.'),
+  available: z
+    .boolean()
+    .optional()
+    .describe(
+      'True when a template was read; false when IANA publishes no registration template for this type, so its references are its defining documents. Absent when fetched is false.',
+    ),
+  file_extensions: z
+    .string()
+    .optional()
+    .describe('The "File extension(s)" statement as written, e.g. ".json".'),
+  intended_usage: z.string().optional().describe('The "Intended usage" statement, e.g. "COMMON".'),
+  deprecated_aliases: z
+    .string()
+    .optional()
+    .describe('The "Deprecated alias names for this type" statement.'),
+});
 
 /** `vnd.gmx - DEPRECATED` → `vnd.gmx` + `DEPRECATED`; `json` → `json` alone. */
 function splitName(name: string): { annotation?: string; subtype: string } {
@@ -158,9 +187,12 @@ function toMediaType(record: RegistryRecord, topLevel: string) {
   };
 }
 
-function toTemplate(template: MediaTemplate) {
+function toTemplate(template: MediaTemplate): z.infer<typeof TemplateSchema> {
+  if (!template.fetched) return { fetched: false };
+  if (!template.available) return { fetched: true, available: false };
   return {
-    fetched: template.fetched,
+    fetched: true,
+    available: true,
     ...(template.fileExtensions ? { file_extensions: template.fileExtensions } : {}),
     ...(template.intendedUsage ? { intended_usage: template.intendedUsage } : {}),
     ...(template.deprecatedAliases ? { deprecated_aliases: template.deprecatedAliases } : {}),
@@ -170,7 +202,7 @@ function toTemplate(template: MediaTemplate) {
 export const lookupMediaType = tool('iana_lookup_media_type', {
   title: 'Look up a media type',
   description:
-    'Look up registered media (MIME) types. Pass exactly one of `type` (a full name such as "application/json"; parameters after ";" are ignored) or `keyword` (words matched against type names, e.g. "geo json"). An exact `type` lookup also reads the registration template and returns its file-extension, intended-usage, and deprecated-alias statements as written. Deprecated and obsoleted types are reported with their replacement when the registry names one. Unregistered "x-" types are not in the registry.',
+    'Look up registered media (MIME) types. Pass exactly one of `type` (a full name such as "application/json"; parameters after ";" are ignored) or `keyword` (words matched against registered type names and status annotations, e.g. "geo json"; never against file extensions). An exact `type` lookup also reads the registration template and returns its file-extension, intended-usage, and deprecated-alias statements as written, each only when the template has it. Some registered types have no registration template (`template.available: false`); their references are the defining documents. Deprecated and obsoleted types are reported with their replacement when the registry names one. Unregistered "x-" types are not in the registry.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
     type: blankAsUnset(z.string().regex(TYPE_PATTERN).optional(), (trimmed) =>
@@ -179,7 +211,7 @@ export const lookupMediaType = tool('iana_lookup_media_type', {
       'Full media type, case-insensitive, e.g. "application/json" ("; charset=utf-8" and other parameters are dropped). Pass this or keyword, not both.',
     ),
     keyword: blankAsUnset(searchWords().optional()).describe(
-      'Words matched as whole tokens against full type names and status annotations, e.g. "geo json". Pass this or type, not both.',
+      'Words matched as whole tokens against registered type names and status annotations, e.g. "geo json". File extensions are not searched: look up the expected type with type to read its template\'s file-extension statement, when the template has one. Pass this or type, not both.',
     ),
     top_level: blankAsUnset(z.enum(TOP_LEVELS).optional(), (trimmed) =>
       trimmed.toLowerCase(),
@@ -216,26 +248,9 @@ export const lookupMediaType = tool('iana_lookup_media_type', {
             references: z.array(ReferenceSchema).describe('Defining references.'),
             registered: z.string().optional().describe('Registration date.'),
             updated: z.string().optional().describe('Last-updated date.'),
-            template: z
-              .object({
-                fetched: z.boolean().describe('False when the template could not be read.'),
-                file_extensions: z
-                  .string()
-                  .optional()
-                  .describe('The "File extension(s)" statement as written, e.g. ".json".'),
-                intended_usage: z
-                  .string()
-                  .optional()
-                  .describe('The "Intended usage" statement, e.g. "COMMON".'),
-                deprecated_aliases: z
-                  .string()
-                  .optional()
-                  .describe('The "Deprecated alias names for this type" statement.'),
-              })
-              .optional()
-              .describe(
-                'Type mode: registration template statements; each absent when the template lacks it.',
-              ),
+            template: TemplateSchema.optional().describe(
+              'Type mode: the registration template read; each statement absent when the template lacks it.',
+            ),
           })
           .describe('One registered media type.'),
       )
@@ -292,6 +307,7 @@ export const lookupMediaType = tool('iana_lookup_media_type', {
           template: toTemplate(await reader.read(mediaType.template_url, budget)),
         })),
       );
+      const untemplated = mediaTypes.find((mediaType) => mediaType.template.available === false);
       discloseList(ctx.enrich, {
         total: matches.length,
         shown: mediaTypes.length,
@@ -302,6 +318,8 @@ export const lookupMediaType = tool('iana_lookup_media_type', {
             `${wanted} is not a registered media type. Unregistered x- types and vendor types never submitted to IANA are absent. Call iana_lookup_media_type with keyword set to the subtype's words to find registered neighbours.`,
           mediaTypes.some((mediaType) => !mediaType.template.fetched) &&
             'The registration template could not be read; registry fields are complete, template statements are missing.',
+          untemplated &&
+            `IANA publishes no registration template for ${inline(untemplated.type)}; its defining documents are the references.`,
           input.top_level !== undefined &&
             'top_level applies to keyword mode only; it was ignored for this exact lookup.',
           offsetIgnored(input.offset, 'keyword'),
@@ -340,6 +358,12 @@ export const lookupMediaType = tool('iana_lookup_media_type', {
       narrow: 'add words to keyword to narrow',
     });
     const mediaTypes = page.items;
+    const miss = ranked.length === 0;
+    const extension = EXTENSION_SHAPED.exec(keyword)?.[1];
+    const extensionShaped =
+      extension !== undefined &&
+      !(TOP_LEVELS as readonly string[]).includes(wanted) &&
+      !all.some((mediaType) => normalizeForSearch(mediaType.subtype) === wanted);
     discloseList(ctx.enrich, {
       total: ranked.length,
       shown: mediaTypes.length,
@@ -347,8 +371,20 @@ export const lookupMediaType = tool('iana_lookup_media_type', {
       more: page.nextOffset !== undefined,
       nextOffset: page.nextOffset,
       fragments: [
-        ranked.length === 0 &&
-          `No registered media type matched "${echo(keyword)}"${topLevel ? ` in ${topLevel}` : ''}. Try fewer words${topLevel ? ' or drop top_level' : ''}.`,
+        miss &&
+          `No registered media type matched "${echo(keyword)}"${topLevel ? ` in ${topLevel}` : ''}.`,
+        miss && query.length > 1 && `Try fewer words${topLevel ? ' or drop top_level' : ''}.`,
+        miss &&
+          query.length === 1 &&
+          topLevel !== undefined &&
+          'Drop top_level to search every top-level type.',
+        miss &&
+          query.length === 1 &&
+          topLevel === undefined &&
+          !extensionShaped &&
+          'Keyword matches whole words of registered type names; try part of the name, or split a joined word ("geo json" finds geo+json).',
+        extensionShaped &&
+          `If "${extension}" is a file extension: keyword search reads registered type names, never file extensions; look up the type you expect with type to read its registration template's file-extension statement, when the template has one.`,
         page.notice,
       ],
     });
@@ -381,7 +417,9 @@ export const lookupMediaType = tool('iana_lookup_media_type', {
       const { template } = mediaType;
       if (template) {
         lines.push(
-          `**Template read:** ${template.fetched ? 'yes' : 'no — the template could not be read'}`,
+          template.available === false
+            ? '**Template published:** no — IANA publishes no registration template for this type; its defining documents are the references'
+            : `**Template read:** ${template.fetched ? 'yes' : 'no — the template could not be read'}`,
         );
         if (template.file_extensions) {
           lines.push('**File extensions:**', quote(template.file_extensions));

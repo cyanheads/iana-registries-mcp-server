@@ -60,6 +60,22 @@ export const statusResponse = (
   contentType = 'text/html',
 ) => respond(body, contentType, headers, status);
 
+/** A redirect to `location` (301 unless `status` says otherwise), as `fetch` returns it under `redirect: 'manual'`. */
+export const redirectResponse = (location: string, status = 301) =>
+  new Response(null, { status, headers: { location } });
+
+/** The recovery hint a redirect off the upstream hosts carries: it never says to retry. */
+export const REDIRECT_OFF_HOST_HINT =
+  'This upstream file redirects off the https hosts this server reads, so calling again fails the same way; open its page on the upstream site instead.';
+
+/** The recovery hint a redirect chain past the hop limit carries. */
+export const REDIRECT_LIMIT_HINT =
+  'This upstream file redirects more than 5 times, so calling again fails the same way; open its page on the upstream site instead.';
+
+/** The recovery hint a body over its byte ceiling carries. */
+export const BODY_OVER_CEILING_HINT =
+  'This upstream file is larger than this server reads, so calling again fails the same way; open its page on the upstream site instead.';
+
 /** A 200 with no content-type header (a stream body, since a string body gets `text/plain`). */
 export const untypedResponse = (body: string) =>
   streamResponse([new TextEncoder().encode(body)], null);

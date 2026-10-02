@@ -70,6 +70,7 @@ const OUTPUTS: Record<string, unknown> = {
         updated: '2026-09-01',
         template: {
           fetched: true,
+          available: true,
           file_extensions: TEXT,
           intended_usage: TEXT,
           deprecated_aliases: TEXT,
@@ -179,10 +180,35 @@ const OUTPUTS: Record<string, unknown> = {
           obsoleted_by: [],
           updates: [],
           updated_by: [],
-          see_also: [],
+          is_also: ['BCP 99'],
           doi: '10.17487/RFC9999',
           url: 'https://www.rfc-editor.org/rfc/rfc9999.html',
           datatracker_url: 'https://datatracker.ietf.org/doc/rfc9999/',
+        },
+      },
+      {
+        id: 'BCP 99',
+        kind: 'series',
+        found: true,
+        series: {
+          members: ['RFC 9999'],
+          datatracker_url: 'https://datatracker.ietf.org/doc/bcp99/',
+        },
+      },
+      {
+        id: 'draft-example-wg-topic',
+        kind: 'draft',
+        found: true,
+        guidance: TEXT,
+        title: TEXT,
+        draft: {
+          rev: '03',
+          requested_revision: '99',
+          state: 'Active',
+          last_updated: '2026-08-01 10:20:30',
+          replaced_by: [],
+          replaces: [],
+          datatracker_url: 'https://datatracker.ietf.org/doc/draft-example-wg-topic/',
         },
       },
     ],
@@ -212,7 +238,9 @@ const OUTPUTS: Record<string, unknown> = {
     references: REFERENCES,
     registration_ranges: [{ range: '0-10', procedure: TEXT, note: TEXT }],
     notes: [{ title: 'WARNING', text: TEXT }, { text: TEXT }],
+    registry_notes: [{ title: 'Formerly known as', anchor: '1', text: TEXT }, { text: TEXT }],
     notes_truncated: true,
+    subregistries: [{ id: 'example-1-1', title: 'Nested One', record_count: 3 }],
     columns: ['value', 'description', 'notes'],
     value_field: 'value',
     records: [
@@ -264,6 +292,17 @@ describe('format(): blockquotes end before the next server line', () => {
     expect(render('iana_lookup_uri_scheme')).toContain(
       '**Description:**\n> First upstream line\n> second upstream line\n\n**Well-known URI support:** RFC 8615',
     );
+  });
+
+  it('separates the quoted registry notes from the notes cut line and the nested tables', () => {
+    const text = render('iana_get_registry_records');
+    expect(text).toContain(
+      '**Registry note (Formerly known as) [anchor 1]:**\n> First upstream line\n> second upstream line\n\n**Registry note:**',
+    );
+    expect(text).toContain(
+      '> second upstream line\n\n*Notes cut at the 4,000-character budget (notes_truncated: true).*',
+    );
+    expect(text).toContain('**Sub-registries (1):**\n- example-1-1 — Nested One (3 records)');
   });
 
   it('separates the last quoted record field from the record dates', () => {

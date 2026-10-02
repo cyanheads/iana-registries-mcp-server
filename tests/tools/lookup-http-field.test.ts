@@ -514,7 +514,7 @@ describeFailureContract({
   reason: 'upstream_unreadable',
   recovery: 'The IANA HTTP field registry could not be read; retry iana_lookup_http_field shortly.',
   unreadable: [
-    { label: 'an HTML page served as 200', attempts: 3, response: () => htmlResponse('<html/>') },
+    { label: 'an HTML page served as 200', attempts: 1, response: () => htmlResponse('<html/>') },
     {
       label: 'a body with no registry root',
       attempts: 3,

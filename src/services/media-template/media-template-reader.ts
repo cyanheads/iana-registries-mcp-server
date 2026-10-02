@@ -1,12 +1,15 @@
 /**
  * @fileoverview Reads media type registration templates
  * (`https://www.iana.org/assignments/media-types/<type>/<subtype>`, plain text)
- * and keeps only the three statements `template-statements.ts` extracts. A
- * template is best-effort context for a registry answer that is already
- * complete, so every failure but the caller's cancellation (404, a wrong content
- * type, a body over 256 KiB, an upstream failure, a spent budget, a full pacer
- * queue) returns `fetched: false` instead of failing the call. Successful reads
- * are cached in an LRU of 256 entries for 24 h, without revalidation.
+ * and keeps only the three statements `template-statements.ts` extracts. For a
+ * registered type with no template, IANA answers 200 with the bare sentence
+ * {@link NO_TEMPLATE_PAGE}; that read is `available: false`, never a template
+ * with no statements. A template is best-effort context for a registry answer
+ * that is already complete, so every failure but the caller's cancellation (404,
+ * a wrong content type, a body over 256 KiB, an upstream failure, a spent budget,
+ * a full pacer queue) returns `fetched: false` instead of failing the call.
+ * Successful reads, the no-template page included, are cached in an LRU of 256
+ * entries for 24 h, without revalidation.
  * @module services/media-template/media-template-reader
  */
 
@@ -22,10 +25,14 @@ export const TEMPLATE_TTL_MS = 24 * 3_600_000;
 /** Decoded-body ceiling for one template. */
 export const TEMPLATE_MAX_BYTES = 256 * 1024;
 
-/** A template read: its statements, or `fetched: false` when it could not be read. */
-export interface MediaTemplate extends TemplateStatements {
-  fetched: boolean;
-}
+/** The whole body, once trimmed, that IANA serves at the template URL of a type with no registration template. */
+const NO_TEMPLATE_PAGE = 'No registration template available.';
+
+/** What a 200 at a template URL held: a template's statements, or the no-template page. */
+type TemplatePage = ({ available: true } & TemplateStatements) | { available: false };
+
+/** A template read: what the page held, or `fetched: false` when it could not be read. */
+export type MediaTemplate = ({ fetched: true } & TemplatePage) | { fetched: false };
 
 /** Constructor options. Every seam a test needs is here, never in env vars. */
 export interface MediaTemplateReaderOptions {
@@ -39,9 +46,16 @@ export interface MediaTemplateReaderOptions {
 }
 
 interface CachedTemplate {
+  page: TemplatePage;
   /** Reader-clock time of the read. */
   readAt: number;
-  statements: TemplateStatements;
+}
+
+/** The page a 200 body is: the no-template sentence alone, after trimming, or a template. */
+function readPage(body: string): TemplatePage {
+  return body.trim() === NO_TEMPLATE_PAGE
+    ? { available: false }
+    : { available: true, ...extractTemplateStatements(body) };
 }
 
 /** Cached, best-effort reads of media type registration templates. */
@@ -61,9 +75,10 @@ export class MediaTemplateReader {
   }
 
   /**
-   * The statements of the template at `url`, inside the caller's budget.
-   * Rejects only when the caller's signal aborted; every other failure resolves
-   * as `{ fetched: false }` with a warning log.
+   * The template at `url`, inside the caller's budget: its statements, or
+   * `available: false` for IANA's no-template page. Rejects only when the
+   * caller's signal aborted; every other failure resolves as `{ fetched: false }`
+   * with a warning log.
    */
   async read(url: string, budget: CallBudget): Promise<MediaTemplate> {
     const cached = this.#cache.get(url);
@@ -71,21 +86,20 @@ export class MediaTemplateReader {
       this.#cache.delete(url);
       if (this.#now() - cached.readAt < this.#ttlMs) {
         this.#cache.set(url, cached);
-        return { fetched: true, ...cached.statements };
+        return { fetched: true, ...cached.page };
       }
     }
 
-    let statements: TemplateStatements | undefined;
+    let page: TemplatePage | undefined;
     try {
-      statements = await this.#client.request(url, {
+      page = await this.#client.request(url, {
         budget,
         profile: 'small',
         operation: 'MediaTemplateReader.read',
         accept: [200, 404],
         expect: 'text',
         maxBytes: TEMPLATE_MAX_BYTES,
-        parse: (response) =>
-          response.status === 200 ? extractTemplateStatements(response.body) : undefined,
+        parse: (response) => (response.status === 200 ? readPage(response.body) : undefined),
       });
     } catch (error) {
       if (budget.signal.aborted) throw error;
@@ -98,17 +112,17 @@ export class MediaTemplateReader {
       );
       return { fetched: false };
     }
-    if (!statements) {
+    if (!page) {
       logger.warning('Media type template answered 404', withExtra(budget.context, { url }));
       return { fetched: false };
     }
 
-    this.#cache.set(url, { readAt: this.#now(), statements });
+    this.#cache.set(url, { readAt: this.#now(), page });
     for (const key of this.#cache.keys()) {
       if (this.#cache.size <= this.#maxEntries) break;
       this.#cache.delete(key);
     }
-    return { fetched: true, ...statements };
+    return { fetched: true, ...page };
   }
 }
 

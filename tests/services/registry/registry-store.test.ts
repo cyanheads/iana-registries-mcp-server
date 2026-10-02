@@ -45,6 +45,7 @@ import {
   htmlResponse,
   makeBudget,
   notModified,
+  redirectResponse,
   settle as settleWith,
   statusResponse,
   textResponse,
@@ -61,7 +62,7 @@ type Answer = (request: Request) => Response | Promise<Response>;
 
 /** A store over a scripted upstream with a manual clock. */
 function setup(
-  storeOptions: { freshMs?: number; staleMaxMs?: number } = {},
+  storeOptions: { freshMs?: number; genericMaxBytes?: number; staleMaxMs?: number } = {},
   pacing?: Parameters<typeof createHarness>[1],
 ) {
   let clock = T0;
@@ -299,21 +300,31 @@ describe('unreadable curated answers', () => {
     expect(failure.data).toMatchObject({ reason: 'upstream_unreadable' });
   });
 
-  it('retries the load inside the ladder: three fetches for one failed read', async () => {
+  it('retries a body that fails to parse inside the ladder: three fetches for one failed read', async () => {
     const s = setup();
-    s.state.answer = () => htmlResponse('<html/>');
+    s.state.answer = () => xmlResponse('this is not xml at all');
     await settle(() => loadStatus(s));
     expect(s.fetches()).toBe(3);
   });
 
-  it('enforces the 4 MiB ceiling on media-types', async () => {
+  it('reads an HTML page served 200 once: every attempt in the load would get the same page', async () => {
+    const s = setup();
+    s.state.answer = () => htmlResponse('<html/>');
+    const { error } = await settle(() => loadStatus(s));
+    expect(asMcpError(error).data).not.toHaveProperty('retryable');
+    expect(s.fetches()).toBe(1);
+  });
+
+  it('enforces the 4 MiB ceiling on media-types, after one fetch and not retryable', async () => {
     const s = setup();
     s.state.answer = () => xmlResponse(sizedXml('media-types', 4 * MiB + 1_024));
     const { error } = await settle(() => s.store.getRegistry('media-types', s.budget()));
     expect(asMcpError(error).data).toMatchObject({
       reason: 'upstream_unreadable',
       maxBytes: 4 * MiB,
+      retryable: false,
     });
+    expect(s.fetches()).toBe(1);
   });
 
   it('accepts a media-types file just under its ceiling', async () => {
@@ -337,6 +348,53 @@ describe('findRegistry (generic registries)', () => {
       registry_updated: '2026-08-30',
       stale: false,
     });
+  });
+
+  it('names the file the data came from in source.url when the registry URL redirects, across a 304', async () => {
+    const s = setup();
+    const LITERAL_TAGS = registryXmlUrl('address-literal-tags');
+    const SMTP = registryXmlUrl('smtp');
+    const answer = (fileAnswer: () => Response) => (request: Request) =>
+      request.url === LITERAL_TAGS
+        ? redirectResponse('http://www.iana.org/assignments/smtp/smtp.xml')
+        : fileAnswer();
+    s.state.answer = answer(() =>
+      xmlResponse(curatedXml('smtp'), { 'last-modified': LAST_MODIFIED }),
+    );
+    const loaded = await s.store.findRegistry('address-literal-tags', s.budget());
+    expect(s.urls()).toEqual([LITERAL_TAGS, SMTP]);
+    expect(loaded?.model.id).toBe('smtp');
+    expect(loaded?.source).toMatchObject({ registry_id: 'address-literal-tags', url: SMTP });
+
+    s.advance(FRESH_MS);
+    s.state.answer = answer(() => notModified());
+    const revalidated = await s.store.findRegistry('address-literal-tags', s.budget());
+    expect(s.header(3, 'if-modified-since')).toBe(LAST_MODIFIED);
+    expect(revalidated?.model).toBe(loaded?.model);
+    expect(revalidated?.source).toMatchObject({ url: SMTP, stale: false });
+  });
+
+  it('keeps a file read through a redirect and under its own id apart: each id answers its own read', async () => {
+    const s = setup();
+    const LITERAL_TAGS = registryXmlUrl('address-literal-tags');
+    s.state.answer = (request) =>
+      request.url === LITERAL_TAGS
+        ? redirectResponse('/assignments/smtp/smtp.xml')
+        : xmlResponse(curatedXml('smtp', '2026-09-01'));
+    const viaRedirect = await s.store.findRegistry('address-literal-tags', s.budget());
+    s.advance(60_000);
+    s.state.answer = () => xmlResponse(curatedXml('smtp', '2026-09-30'));
+    const direct = await s.store.findRegistry('smtp', s.budget());
+    expect(direct?.source).toMatchObject({ registry_id: 'smtp', registry_updated: '2026-09-30' });
+    const again = await s.store.findRegistry('address-literal-tags', s.budget());
+    expect(again?.model).toBe(viaRedirect?.model);
+    expect(again?.source).toMatchObject({
+      registry_id: 'address-literal-tags',
+      url: registryXmlUrl('smtp'),
+      registry_updated: '2026-09-01',
+      fetched_at: new Date(T0).toISOString(),
+    });
+    expect(s.fetches()).toBe(3);
   });
 
   it('returns undefined for a 404 and remembers it for 15 minutes: two calls make one fetch', async () => {
@@ -745,10 +803,13 @@ describe('eviction of generic registries', () => {
     expect(s.fetches()).toBe(before + 1);
   });
 
-  it('evicts by combined source bytes past 8 MiB, oldest first', async () => {
-    const s = setup();
+  /** A byte cap small enough that the eviction tests parse KiB-sized bodies, not MiB. */
+  const CAP = 64 * 1024;
+
+  it('evicts by combined source bytes past the byte cap, oldest first', async () => {
+    const s = setup({ genericMaxBytes: CAP });
     s.state.answer = (request) =>
-      xmlResponse(sizedXml(request.url.split('/').at(-2) ?? 'x', 3 * MiB));
+      xmlResponse(sizedXml(request.url.split('/').at(-2) ?? 'x', 24 * 1024));
     await read(s, 'heavy-a');
     await read(s, 'heavy-b');
     expect(s.fetches()).toBe(2);
@@ -766,8 +827,8 @@ describe('eviction of generic registries', () => {
   });
 
   it('always keeps the newest entry, even one over the byte cap on its own', async () => {
-    const s = setup();
-    s.state.answer = () => xmlResponse(sizedXml('whale', GENERIC_MAX_BYTES + MiB));
+    const s = setup({ genericMaxBytes: CAP });
+    s.state.answer = () => xmlResponse(sizedXml('whale', CAP + 16 * 1024));
     await read(s, 'whale');
     await read(s, 'whale');
     expect(s.fetches()).toBe(1);

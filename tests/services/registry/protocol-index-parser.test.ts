@@ -219,6 +219,89 @@ describe('parseProtocolIndex', () => {
   });
 });
 
+describe('parseProtocolIndex: a pair listed more than once', () => {
+  const twice = indexPage(
+    categoryRow('Interface Parameters'),
+    entryRow({ href: '/assignments/smi-example#smi-example-5', title: 'ifType Definitions' }),
+    entryRow({ href: '/assignments/smi-example#smi-example-6', title: 'Tunnel Types' }),
+    categoryRow('Management &amp; Information'),
+    entryRow({ href: '/assignments/smi-example', title: 'Example Numbers' }),
+    entryRow({ href: '/assignments/smi-example#smi-example-5', title: 'ifType Definitions' }),
+    categoryRow('Interface Parameters'),
+    entryRow({ href: '/assignments/smi-example#smi-example-5', title: 'ifType Definitions' }),
+  );
+  const index = parseProtocolIndex(twice);
+  const pairs = index.entries.map((entry) => `${entry.registryId}#${entry.subregistryId ?? ''}`);
+
+  it('keeps one entry per registry/sub-registry pair, at its first position', () => {
+    expect(pairs).toEqual([
+      'smi-example#smi-example-5',
+      'smi-example#smi-example-6',
+      'smi-example#',
+    ]);
+    expect(index.categoryCount).toBe(3);
+  });
+
+  it('joins the categories it is listed under with "; ", each once, in index order', () => {
+    expect(index.entries[0]).toMatchObject({
+      title: 'ifType Definitions',
+      category: 'Interface Parameters; Management & Information',
+      pageUrl: 'https://www.iana.org/assignments/smi-example#smi-example-5',
+    });
+    expect(index.entries[1]?.category).toBe('Interface Parameters');
+    expect(index.entries[2]?.category).toBe('Management & Information');
+  });
+
+  it('indexes the words of every category it is listed under', () => {
+    expect(index.entries[0]?.searchText).toBe(
+      ' iftype definitions interface parameters management information smi example smi example 5 if type ',
+    );
+  });
+
+  it('shows the first listing and indexes every distinct title the pair is listed under', () => {
+    const retitled = parseProtocolIndex(
+      indexPage(
+        categoryRow('Interface Parameters'),
+        entryRow({
+          href: '/assignments/smi-example#smi-example-5',
+          title: 'ifType Definitions',
+          procedure: 'Expert Review',
+          docs: [{ id: 'RFC9999' }],
+        }),
+        categoryRow('Management'),
+        entryRow({
+          href: '/assignments/smi-example#smi-example-5',
+          title: 'Interface Kinds',
+          procedure: 'First Come First Served',
+          docs: [{ id: 'RFC8888' }],
+        }),
+        entryRow({ href: '/assignments/smi-example#smi-example-5', title: 'Tunnel Sorts' }),
+        entryRow({ href: '/assignments/smi-example#smi-example-5', title: 'Interface Kinds' }),
+      ),
+    );
+    expect(retitled.entries).toHaveLength(1);
+    expect(retitled.entries[0]).toMatchObject({
+      title: 'ifType Definitions',
+      category: 'Interface Parameters; Management',
+      registrationProcedure: 'Expert Review',
+      definingDocuments: [{ id: 'RFC9999' }],
+    });
+    expect(retitled.entries[0]?.searchText).toBe(
+      ' iftype definitions interface kinds tunnel sorts interface parameters management smi example smi example 5 if type ',
+    );
+  });
+
+  it('keeps a pair listed once as it was', () => {
+    const once = parseProtocolIndex(
+      indexPage(
+        categoryRow('Interface Parameters'),
+        entryRow({ href: '/assignments/smi-example#smi-example-6', title: 'Tunnel Types' }),
+      ),
+    );
+    expect(once.entries[0]).toEqual(index.entries[1]);
+  });
+});
+
 describe('linear-time scanning', () => {
   const TITLE = '<td><div class="reg-title"><a href="/assignments/a">T</a></div></td>';
   /** A row whose defining-document cell ends in `cell`, with no `>` after it. */

@@ -1,7 +1,14 @@
 /**
  * @fileoverview Tests for `iana_get_registry_records`: registry id and URL
- * inputs, sub-registry selection, the `value` and `contains` filters, the
- * filter-fingerprinted cursor, `cursor_mismatch`, and the cursor's integer and
+ * inputs, a registry id that names a table inside another root, sub-registry
+ * selection, the `value` and `contains` filters, keying by the table's key
+ * column, `field` and `unknown_field`, numeric digit and one-token hex matches
+ * beside the as-written multi-token hex forms, the counted holder hints on a
+ * miss and on a hit that skipped rows without a key cell, the exact-first
+ * `contains` ranking, the root's `registry_notes` and the nested tables a table
+ * lists, the filters a listing does not apply, the filter-fingerprinted cursor
+ * (a pre-ranking `contains` cursor included), `offset` and the absolute
+ * `Record N` heading, `cursor_mismatch`, and the cursor's integer and
  * date checks, the 48,000-character output budget and the field, record, and
  * note caps, the 404 retry through the protocol index and the 15-minute memory
  * of a 404, `non_xml_registry`, email scrubbing with the key column kept
@@ -47,6 +54,7 @@ import {
 } from '../fixtures/registry-xml.js';
 import { searchIndexHtml } from '../fixtures/search-index.js';
 import { describeFailureContract } from '../shared/failure-contract.js';
+import { missingFromText } from '../shared/format-parity.js';
 import { callTool, setupTools, type ToolOutcome } from '../shared/tool-harness.js';
 import { hang, htmlResponse, statusResponse, xmlResponse } from '../shared/upstream-harness.js';
 
@@ -93,6 +101,21 @@ function reMint(cursor: string, changes: Record<string, unknown>): string {
     requestContextService.createRequestContext({ operation: 'test' }),
   );
   return encodeCursor({ ...state, ...changes } as never);
+}
+
+/**
+ * The cursor filter key the release before exact-first `contains` ranking minted:
+ * a base-36 FNV-1a hash of the JSON of registry, sub-registry, squashed value,
+ * and contains.
+ */
+function previousReleaseKey(parts: readonly string[]): string {
+  const text = JSON.stringify(parts);
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(36);
 }
 
 describe('iana_get_registry_records: reading one table', () => {
@@ -157,7 +180,6 @@ describe('iana_get_registry_records: reading one table', () => {
     boot();
     const rows = records(await alpha());
     expect(rows[1]).toEqual({
-      value: 'no-value-column',
       fields: { name: 'no-value-column', description: 'Sparse record: no value element, no date' },
       references: [],
     });
@@ -406,6 +428,69 @@ describe('iana_get_registry_records: registry input', () => {
   });
 });
 
+/** A parent registry's file, served for the id of one of its sub-registries. */
+const MOVED_XML = registryXml({
+  id: 'parent-registry',
+  body:
+    subregistryXml(
+      'moved-table',
+      recordXml({ value: '1', description: 'moved one' }) +
+        recordXml({ value: '2', description: 'moved two' }),
+      'Moved Table',
+    ) + subregistryXml('sibling', recordXml({ value: '9', description: 'sibling nine' })),
+});
+
+describe('iana_get_registry_records: a registry id that names a table in another registry', () => {
+  it('reads the table whose id the request names when the file has another root id', async () => {
+    boot('moved-table', MOVED_XML);
+    const out = await call({ registry: 'moved-table' });
+    expect(out.structured).toMatchObject({
+      registry_id: 'parent-registry',
+      subregistry_id: 'moved-table',
+      subregistry_title: 'Moved Table',
+      totalCount: 2,
+    });
+    expect(values(out)).toEqual(['1', '2']);
+    expect(out.structured).not.toHaveProperty('subregistries');
+    expect(out.text).toContain('**Sub-registry:** moved-table — Moved Table');
+    expect(values(await call({ registry: 'moved-table', value: '2' }))).toEqual(['2']);
+  });
+
+  it('matches that table id case-insensitively', async () => {
+    boot('Moved-Table', MOVED_XML);
+    const out = await call({ registry: 'Moved-Table' });
+    expect(out.structured).toMatchObject({ subregistry_id: 'moved-table', totalCount: 2 });
+  });
+
+  it('lets an explicit subregistry or URL fragment win', async () => {
+    boot('moved-table', MOVED_XML);
+    const explicit = await call({ registry: 'moved-table', subregistry: 'sibling' });
+    expect(explicit.structured).toMatchObject({ subregistry_id: 'sibling' });
+    expect(values(explicit)).toEqual(['9']);
+    const fragment = await call({
+      registry: 'https://www.iana.org/assignments/moved-table#sibling',
+    });
+    expect(fragment.structured).toMatchObject({ subregistry_id: 'sibling' });
+  });
+
+  it('keeps the listing when no table has the requested id, or when the root id is the request', async () => {
+    const s = boot('unrelated-id', MOVED_XML);
+    s.serve({ [NESTED_URL]: () => xmlResponse(NESTED_XML) });
+    const unrelated = await call({ registry: 'unrelated-id' });
+    expect(unrelated.structured).toMatchObject({
+      registry_id: 'parent-registry',
+      records: [],
+      subregistries: [
+        { id: 'moved-table', title: 'Moved Table', record_count: 2 },
+        { id: 'sibling', title: 'sibling title', record_count: 1 },
+      ],
+    });
+    const own = await call({ registry: 'example-parameters' });
+    expect(own.structured).toMatchObject({ registry_id: 'example-parameters', records: [] });
+    expect(own.structured).not.toHaveProperty('subregistry_id');
+  });
+});
+
 describe('iana_get_registry_records: sub-registry selection', () => {
   it('lists the sub-registries, the root notes, and no records when several hold records', async () => {
     boot();
@@ -535,29 +620,100 @@ describe('iana_get_registry_records: sub-registry selection', () => {
     });
   });
 
-  it('answers an empty root table as zero records, not an error', async () => {
+  it('answers an empty root table as zero records, not an error, listing the tables it nests', async () => {
     boot();
     const out = await call({ registry: 'example-parameters', subregistry: 'example-parameters' });
     expect(out.isError).toBe(false);
     expect(out.structured).toMatchObject({
       records: [],
       totalCount: 0,
-      notice: 'example-parameters holds no records.',
+      subregistries: [
+        { id: 'alpha', title: 'Alpha Values', record_count: 6 },
+        { id: 'beta', title: 'Beta Values', record_count: 1 },
+      ],
+      notice:
+        'example-parameters holds no records. It nests 2 tables; call again with subregistry set to one of the listed ids.',
     });
+    expect(out.structured).not.toHaveProperty('registry_notes');
   });
 });
 
+/** Keys written with and without leading zeros, a hex cell, and a decimal range. */
+const ZEROS_XML = registryXml({
+  id: 'zeros-registry',
+  body: ['0', '7', '0512', '0x07', '100-199']
+    .map((value, index) => recordXml({ value, description: `row ${index}` }))
+    .join(''),
+});
+
 describe('iana_get_registry_records: value filter', () => {
+  it('compares a digit string with a digit cell by number, ignoring leading zeros on either side', async () => {
+    boot('zeros-registry', ZEROS_XML);
+    const key = async (value: string) => values(await call({ registry: 'zeros-registry', value }));
+    expect(await key('0')).toEqual(['0']);
+    expect(await key('000')).toEqual(['0']);
+    expect(await key('007')).toEqual(['7']);
+    expect(await key('512')).toEqual(['0512']);
+    expect(await key('00512')).toEqual(['0512']);
+    expect(await key('0000000000000000512')).toEqual(['0512']);
+    expect(await key('0000000000000000150')).toEqual(['100-199']);
+    expect(await key('5120')).toEqual([]);
+    const out = await call({ registry: 'zeros-registry', value: '0007' });
+    expect(out.structured).toMatchObject({ totalCount: 1, records: [{ value: '7' }] });
+    expect(out.text).toContain('#### 7\n> **description:** row 1');
+  });
+
+  it('never matches a decimal against a hex cell, nor a hex value against a decimal cell', async () => {
+    boot('zeros-registry', ZEROS_XML);
+    const key = async (value: string) => values(await call({ registry: 'zeros-registry', value }));
+    expect(await key('7')).toEqual(['7']);
+    expect(await key('07')).toEqual(['7']);
+    expect(await key('0x7')).toEqual(['0x07']);
+    expect(await key('0x0')).toEqual([]);
+    expect(await key('0x150')).toEqual([]);
+  });
+
+  it('compares port numbers with leading zeros in a number-keyed table', async () => {
+    boot('service-names-port-numbers', PORTS_XML);
+    const port = (value: string) => call({ registry: 'service-names-port-numbers', value });
+    expect(values(await port('08080'))).toEqual(['8080', '8080']);
+    expect(values(await port('05005'))).toEqual(['5000-5010']);
+  });
+
   it('matches the key column exactly, ignoring case, whitespace at the edges, and inner spacing', async () => {
     boot();
     expect(values(await alpha({ value: '1' }))).toEqual(['1']);
     expect(values(await alpha({ value: ' 2 ' }))).toEqual(['2']);
-    expect(values(await alpha({ value: 'NO-VALUE-COLUMN' }))).toEqual(['no-value-column']);
     expect((await alpha({ value: '1' })).structured).toMatchObject({
       value_field: 'value',
       totalCount: 1,
     });
     expect(values(await alpha({ value: '0' }))).toEqual([]);
+  });
+
+  it('never key-matches a row without the value_field column, and names the column that holds the value', async () => {
+    boot();
+    const out = await alpha({ value: 'NO-VALUE-COLUMN' });
+    expect(out.structured).toMatchObject({
+      records: [],
+      totalCount: 0,
+      value_field: 'value',
+      notice:
+        'No record in alpha has value "NO-VALUE-COLUMN". Column name (1 row) holds "NO-VALUE-COLUMN"; call again with field set to name.',
+    });
+    expect(out.text).toContain(
+      'Column name (1 row) holds "NO-VALUE-COLUMN"; call again with field set to name.',
+    );
+    const found = await alpha({ value: 'NO-VALUE-COLUMN', field: 'name' });
+    expect(records(found)).toEqual([
+      {
+        fields: {
+          name: 'no-value-column',
+          description: 'Sparse record: no value element, no date',
+        },
+        references: [],
+      },
+    ]);
   });
 
   it('matches a decimal value against range rows and exact rows', async () => {
@@ -625,6 +781,100 @@ describe('iana_get_registry_records: value filter', () => {
         'No record in alpha has value "zzz". Drop value, or check the column names listed in columns.',
     });
     expect(out.structured).toHaveProperty('columns', ['value', 'name', 'description', 'file']);
+  });
+});
+
+/** A DNS RR type shaped table: the mnemonic in `type`, the key in `value`, cross-references in `description`. */
+const RR_XML = registryXml({
+  id: 'rr-registry',
+  body: subregistryXml(
+    'rr-types',
+    [
+      recordXml({ type: 'A', value: '1', description: 'a host address' }),
+      recordXml({ type: 'NS', value: '2', description: 'an authoritative name server' }),
+      recordXml({ type: 'MD', value: '3', description: 'a mail destination (OBSOLETE - use MX)' }),
+      recordXml({ type: 'MF', value: '4', description: 'a mail forwarder (OBSOLETE - use MX)' }),
+      recordXml({ type: 'MX', value: '15', description: 'mail exchange' }),
+      recordXml({ type: 'AAAA', value: '28', description: 'IP6 Address' }),
+      recordXml({ type: 'MAILA', value: '254', description: 'mail agent RRs (OBSOLETE - see MX)' }),
+    ].join(''),
+    'Resource Record (RR) TYPEs',
+  ),
+});
+
+/** A port-registry shaped root table: one service name with numbered rows and a port-less row. */
+const SERVICE_XML = registryXml({
+  id: 'service-registry',
+  body: [
+    recordXml({ name: 'https', protocol: 'tcp', number: '443', description: 'http over TLS' }),
+    recordXml({ name: 'https', protocol: 'udp', number: '443', description: 'http over TLS' }),
+    recordXml({ name: 'https', protocol: 'sctp', number: '443', description: 'HTTPS' }),
+    recordXml({ name: 'ldaps', protocol: 'tcp', number: '636', description: 'ldap over TLS' }),
+    recordXml({ name: 'https', protocol: 'none', description: 'reserved without a port' }),
+    recordXml({ name: 'alt-range', protocol: 'tcp', number: '5000-5010', description: 'https' }),
+  ].join(''),
+});
+
+describe('iana_get_registry_records: value matches that stay unchanged', () => {
+  it('matches number-keyed rows, number range rows, and the empty-name row by their number', async () => {
+    boot('service-names-port-numbers', PORTS_XML);
+    const port = (value: string) => call({ registry: 'service-names-port-numbers', value });
+    expect(values(await port('8080'))).toEqual(['8080', '8080']);
+    expect(values(await port('5005'))).toEqual(['5000-5010']);
+    expect(values(await port('9'))).toEqual(['9']);
+    expect((await port('8080')).structured).toMatchObject({ value_field: 'number', totalCount: 2 });
+  });
+
+  it('keeps every value_field hit of a table that also has a row without that column', async () => {
+    boot('service-registry', SERVICE_XML);
+    const out = await call({ registry: 'service-registry', value: '443' });
+    expect(records(out).map((row) => row.fields.protocol)).toEqual(['tcp', 'udp', 'sctp']);
+    expect(values(out)).toEqual(['443', '443', '443']);
+  });
+
+  it('returns every contains match, whatever their order', async () => {
+    boot('rr-registry', RR_XML);
+    const out = await call({ registry: 'rr-registry', contains: 'MX' });
+    expect(out.structured).toMatchObject({ totalCount: 4, shown: 4 });
+    expect(
+      records(out)
+        .map((row) => row.fields.type)
+        .sort(),
+    ).toEqual(['MAILA', 'MD', 'MF', 'MX']);
+  });
+
+  it('returns exactly the listing fields on an unfiltered listing', async () => {
+    boot();
+    const out = await call({ registry: 'example-parameters' });
+    expect(Object.keys(out.structured).sort()).toEqual([
+      'cap',
+      'columns',
+      'notes',
+      'notice',
+      'records',
+      'registration_procedure',
+      'registry_id',
+      'registry_title',
+      'shown',
+      'source',
+      'subregistries',
+      'totalCount',
+      'truncated',
+    ]);
+  });
+
+  it('keeps only the read table own notes in notes on a sub-registry read', async () => {
+    boot();
+    expect((await alpha()).structured.notes).toEqual([
+      {
+        title: 'NOTE',
+        anchor: 'alpha-1',
+        text: 'First line\nsecond line\nA paragraph\nAnother paragraph',
+      },
+    ]);
+    expect(
+      (await call({ registry: 'example-parameters', subregistry: 'beta' })).structured.notes,
+    ).toEqual([{ anchor: 'beta-fn', text: 'Beta footnote.' }]);
   });
 });
 
@@ -738,14 +988,7 @@ describe('iana_get_registry_records: cursor', () => {
       });
     } while (cursor);
     expect(pages).toBe(3);
-    expect(collected).toEqual([
-      '1',
-      'no-value-column',
-      undefined,
-      undefined,
-      'bindkey@example.org',
-      '2',
-    ]);
+    expect(collected).toEqual(['1', undefined, undefined, undefined, 'bindkey@example.org', '2']);
   });
 
   it('discloses the cut and the remaining count, and prints the cursor in format()', async () => {
@@ -820,7 +1063,8 @@ describe('iana_get_registry_records: cursor', () => {
     expect(out.isError).toBe(true);
     expect(errorOf(out)).toMatchObject({
       code: JsonRpcErrorCode.ValidationError,
-      message: 'This cursor was minted for a different registry, subregistry, value, or contains.',
+      message:
+        'This cursor was minted for a different registry, subregistry, value, field, or contains.',
       data: {
         reason: 'cursor_mismatch',
         recovery: {
@@ -967,6 +1211,937 @@ describe('iana_get_registry_records: cursor', () => {
     const minted = reMint(first.structured.next_cursor as string, { u: '2020-01-01' });
     const out = await call({ registry: 'undated', limit: 2, cursor: minted });
     expect(out.structured.notice).toContain('(2020-01-01 → no date)');
+  });
+});
+
+/** A special-purpose address registry shape: records cite root footnotes; the one sub-registry has its own notes. */
+const SPECIAL_XML = registryXml({
+  id: 'special-addresses',
+  body:
+    subregistryXml(
+      'special-addresses-1',
+      `<note>Sub-registry note.</note><note title="Formerly known as">Old sub-registry name</note>${recordXml({ prefix: '2001::/23', source: 'False', destination: 'False' }, '<xref type="note" data="1"/>')}${recordXml({ prefix: '2002::/16', source: 'N/A' }, '<xref type="note" data="2"/>')}`,
+      'Special-Purpose Address Space',
+    ) +
+    '<footnote anchor="1">Unless allowed by a more specific allocation.</footnote><footnote anchor="2">See RFC 3056 for details.</footnote>',
+});
+
+/** An address-space shape: two root notes, one titled, and a sub-registry with no `<title>`. */
+const UNTITLED_XML = registryXml({
+  id: 'address-space',
+  body: `<note>The address management function was delegated to IANA.</note><note title="Formerly known as">Address Space (old)</note><registry id="address-space-1">${recordXml({ prefix: '::/8', description: 'Reserved by IETF' })}${recordXml({ prefix: '2000::/3', description: 'Global Unicast' })}</registry>`,
+});
+
+/** An ICMP shape: a record-less "codes" table nesting one table per type, one of them record-less. */
+const PARENT_XML = registryXml({
+  id: 'icmp-like',
+  body:
+    subregistryXml(
+      'types',
+      recordXml({ value: '0', description: 'Echo Reply' }) +
+        recordXml({ value: '3', description: 'Destination Unreachable' }),
+      'Type Numbers',
+    ) +
+    subregistryXml(
+      'codes',
+      `<note>Codes are listed per type.</note>${subregistryXml('codes-0', recordXml({ value: '0', description: 'No Code' }), 'Type 0 - Echo Reply')}${subregistryXml('codes-3', recordXml({ value: '0', description: 'Net Unreachable' }) + recordXml({ value: '1', description: 'Host Unreachable' }), 'Type 3 - Destination Unreachable')}${subregistryXml('codes-4', '', 'Type 4 - Source Quench (Deprecated)')}${subregistryXml('lone', subregistryXml('lone-child', recordXml({ value: '9' })))}`,
+      'Code Fields',
+    ),
+});
+
+describe('iana_get_registry_records: root notes on a sub-registry read', () => {
+  it('returns the root footnotes the records cite as registry_notes, beside the sub-registry notes', async () => {
+    boot('special-addresses', SPECIAL_XML);
+    const out = await call({ registry: 'special-addresses' });
+    expect(out.structured).toMatchObject({
+      subregistry_id: 'special-addresses-1',
+      notes: [
+        { text: 'Sub-registry note.' },
+        { title: 'Formerly known as', text: 'Old sub-registry name' },
+      ],
+      registry_notes: [
+        { anchor: '1', text: 'Unless allowed by a more specific allocation.' },
+        { anchor: '2', text: 'See RFC 3056 for details.' },
+      ],
+    });
+    expect(out.structured).not.toHaveProperty('notes_truncated');
+    expect(records(out)[0]?.references).toEqual([{ type: 'note', id: '1' }]);
+    expect(out.text).toContain(
+      '**Registry note [anchor 1]:**\n> Unless allowed by a more specific allocation.',
+    );
+    expect(out.text).toContain('**Note (Formerly known as):**\n> Old sub-registry name');
+    expect(missingFromText(out.structured, out.text)).toEqual([]);
+  });
+
+  it('carries registry_notes on an explicit sub-registry read, first page only', async () => {
+    boot();
+    const first = await alpha({ limit: 2 });
+    expect(first.structured.registry_notes).toEqual([
+      {
+        anchor: 'root-note',
+        text: 'Root note with the spec (https://example.org/spec) and Other Registry (example-other).',
+      },
+    ]);
+    const second = await alpha({ limit: 2, cursor: first.structured.next_cursor });
+    expect(second.structured.notes).toEqual([]);
+    expect(second.structured).not.toHaveProperty('registry_notes');
+    expect(second.text).not.toContain('Registry note');
+  });
+
+  it('returns the root notes, a titled one included, on the default read of an untitled table', async () => {
+    boot('address-space', UNTITLED_XML);
+    const out = await call({ registry: 'address-space' });
+    expect(out.structured).toMatchObject({
+      subregistry_id: 'address-space-1',
+      subregistry_title: '',
+      notes: [],
+      registry_notes: [
+        { text: 'The address management function was delegated to IANA.' },
+        { title: 'Formerly known as', text: 'Address Space (old)' },
+      ],
+    });
+    expect(out.text).toContain('**Registry note (Formerly known as):**\n> Address Space (old)');
+  });
+
+  it('returns no registry_notes on a listing, a root read, or when the root has no notes', async () => {
+    boot();
+    const listing = await call({ registry: 'example-parameters' });
+    expect(listing.structured).not.toHaveProperty('registry_notes');
+    expect(listing.structured.notes).toHaveLength(1);
+    const root = await call({ registry: 'example-parameters', subregistry: 'example-parameters' });
+    expect(root.structured).not.toHaveProperty('registry_notes');
+    expect(root.structured.notes).toHaveLength(1);
+
+    boot('icmp-like', PARENT_XML);
+    const plain = await call({ registry: 'icmp-like', subregistry: 'codes' });
+    expect(plain.structured).not.toHaveProperty('registry_notes');
+  });
+
+  it('keeps table notes first under the shared 4,000-character budget and cuts the root note that crosses it', async () => {
+    boot(
+      'shared-notes',
+      registryXml({
+        id: 'shared-notes',
+        body: `<note anchor="r1">${'r'.repeat(3_000)}</note><note anchor="r2">tail</note>${subregistryXml('table', `<note anchor="t1">${'t'.repeat(3_000)}</note>${recordXml({ value: '1' })}`)}${subregistryXml('other', recordXml({ value: '2' }))}`,
+      }),
+    );
+    const out = await call({ registry: 'shared-notes', subregistry: 'table' });
+    expect(out.structured.notes).toEqual([{ anchor: 't1', text: 't'.repeat(3_000) }]);
+    expect(out.structured.registry_notes).toEqual([{ anchor: 'r1', text: `${'r'.repeat(999)}…` }]);
+    expect(out.structured.notes_truncated).toBe(true);
+    expect(out.text).toContain(
+      '*Notes cut at the 4,000-character budget (notes_truncated: true).*',
+    );
+  });
+
+  it.each([
+    ['both lists fit exactly', 2_000, 2_000, 1, false],
+    ['the table notes fill the budget', 4_000, 1, 0, true],
+    ['one character of room for the root note', 3_999, 2, 0, true],
+    ['two characters of room for the root note', 3_998, 3, 1, true],
+  ])(
+    'treats %s at the shared budget boundary',
+    async (_label, tableSize, rootSize, rootKept, truncated) => {
+      boot(
+        'edge-shared',
+        registryXml({
+          id: 'edge-shared',
+          body: `<note>${'r'.repeat(rootSize)}</note>${subregistryXml('t', `<note>${'t'.repeat(tableSize)}</note>${recordXml({ value: '1' })}`)}${subregistryXml('u', recordXml({ value: '2' }))}`,
+        }),
+      );
+      const out = await call({ registry: 'edge-shared', subregistry: 't' });
+      expect(out.structured.notes).toHaveLength(1);
+      expect((out.structured.registry_notes as unknown[] | undefined)?.length ?? 0).toBe(rootKept);
+      expect(out.structured.notes_truncated === true).toBe(truncated);
+    },
+  );
+
+  it('counts both lists toward the 25-note cap, table notes first', async () => {
+    const notes = (prefix: string, count: number) =>
+      Array.from({ length: count }, (_, index) => `<note anchor="${prefix}${index}">x</note>`).join(
+        '',
+      );
+    boot(
+      'many-shared',
+      registryXml({
+        id: 'many-shared',
+        body: `${notes('r', 10)}${subregistryXml('t', `${notes('t', 20)}${recordXml({ value: '1' })}`)}${subregistryXml('u', recordXml({ value: '2' }))}`,
+      }),
+    );
+    const out = await call({ registry: 'many-shared', subregistry: 't' });
+    expect(out.structured.notes).toHaveLength(20);
+    expect((out.structured.registry_notes as { anchor: string }[]).map((n) => n.anchor)).toEqual([
+      'r0',
+      'r1',
+      'r2',
+      'r3',
+      'r4',
+    ]);
+    expect(out.structured.notice).toBe('Showing the first 25 of 30 notes.');
+  });
+});
+
+describe('iana_get_registry_records: nested tables', () => {
+  it('lists the tables a record-less table nests, record-less ones included, with the nesting notice', async () => {
+    boot('icmp-like', PARENT_XML);
+    const out = await call({ registry: 'icmp-like', subregistry: 'codes' });
+    expect(out.isError).toBe(false);
+    expect(out.structured).toMatchObject({
+      subregistry_id: 'codes',
+      notes: [{ text: 'Codes are listed per type.' }],
+      columns: [],
+      records: [],
+      subregistries: [
+        { id: 'codes-0', title: 'Type 0 - Echo Reply', record_count: 1 },
+        { id: 'codes-3', title: 'Type 3 - Destination Unreachable', record_count: 2 },
+        { id: 'codes-4', title: 'Type 4 - Source Quench (Deprecated)', record_count: 0 },
+        { id: 'lone', title: 'lone title', record_count: 0 },
+      ],
+      totalCount: 0,
+      shown: 0,
+      truncated: false,
+      notice:
+        'codes holds no records. It nests 4 tables; call again with subregistry set to one of the listed ids.',
+    });
+    expect(out.text).toContain('**Sub-registries (4):**');
+    expect(out.text).toContain('- codes-4 — Type 4 - Source Quench (Deprecated) (0 records)');
+    expect(missingFromText(out.structured, out.text)).toEqual([]);
+  });
+
+  it('names one nested table in the singular, and reads the nested table past the first level', async () => {
+    boot('icmp-like', PARENT_XML);
+    const lone = await call({ registry: 'icmp-like', subregistry: 'lone' });
+    expect(lone.structured).toMatchObject({
+      subregistries: [{ id: 'lone-child', title: 'lone-child title', record_count: 1 }],
+      notice:
+        'lone holds no records. It nests 1 table; call again with subregistry set to one of the listed ids.',
+    });
+    expect(values(await call({ registry: 'icmp-like', subregistry: 'codes-3' }))).toEqual([
+      '0',
+      '1',
+    ]);
+    const leaf = await call({ registry: 'icmp-like', subregistry: 'lone-child' });
+    expect(values(leaf)).toEqual(['9']);
+    expect(leaf.structured).not.toHaveProperty('subregistries');
+  });
+
+  it('keeps the plain empty-table notice for a record-less table that nests nothing', async () => {
+    boot('icmp-like', PARENT_XML);
+    const out = await call({ registry: 'icmp-like', subregistry: 'codes-4' });
+    expect(out.structured).toMatchObject({ records: [], notice: 'codes-4 holds no records.' });
+    expect(out.structured).not.toHaveProperty('subregistries');
+  });
+
+  it('lists the root direct children on a read of a record-less root, and keeps the flat listing', async () => {
+    boot('icmp-like', PARENT_XML);
+    const root = await call({ registry: 'icmp-like', subregistry: 'icmp-like' });
+    expect(root.structured.subregistries).toEqual([
+      { id: 'types', title: 'Type Numbers', record_count: 2 },
+      { id: 'codes', title: 'Code Fields', record_count: 0 },
+    ]);
+    const listing = await call({ registry: 'icmp-like' });
+    expect((listing.structured.subregistries as { id: string }[]).map((sub) => sub.id)).toEqual([
+      'types',
+      'codes',
+      'codes-0',
+      'codes-3',
+      'codes-4',
+      'lone',
+      'lone-child',
+    ]);
+  });
+
+  it('lists the tables a table with records nests beside its records, on the first page only', async () => {
+    boot();
+    const first = await alpha({ limit: 2 });
+    expect(first.structured.subregistries).toEqual([
+      { id: 'alpha-deep', title: 'Alpha Deep Values', record_count: 1 },
+    ]);
+    expect(values(first)).toEqual(['1', undefined]);
+    expect(String(first.structured.notice)).not.toContain('nests');
+    const second = await alpha({ limit: 2, cursor: first.structured.next_cursor });
+    expect(second.structured).not.toHaveProperty('subregistries');
+    const deep = await call({ registry: 'example-parameters', subregistry: 'alpha-deep' });
+    expect(deep.structured.subregistries).toEqual([
+      { id: 'alpha-deeper', title: 'Alpha Deeper Values', record_count: 1 },
+    ]);
+    expect(values(deep)).toEqual(['10']);
+  });
+
+  it('lists the records and the nested tables of a root that holds both', async () => {
+    boot(
+      'both-levels',
+      registryXml({
+        id: 'both-levels',
+        body: `${recordXml({ value: 'r1' })}${subregistryXml('child', recordXml({ value: 'c1' }))}`,
+      }),
+    );
+    const root = await call({ registry: 'both-levels', subregistry: 'both-levels' });
+    expect(values(root)).toEqual(['r1']);
+    expect(root.structured.subregistries).toEqual([
+      { id: 'child', title: 'child title', record_count: 1 },
+    ]);
+  });
+
+  it('lists the first 250 nested tables and gives their total in the notice', async () => {
+    const children = Array.from({ length: 260 }, (_, index) =>
+      subregistryXml(`n${index}`, recordXml({ value: '1' })),
+    ).join('');
+    boot(
+      'wide-parent',
+      registryXml({
+        id: 'wide-parent',
+        body: `${subregistryXml('parent', children)}${subregistryXml('sibling', recordXml({ value: '1' }))}`,
+      }),
+    );
+    const out = await call({ registry: 'wide-parent', subregistry: 'parent' });
+    const listed = out.structured.subregistries as { id: string }[];
+    expect(listed).toHaveLength(250);
+    expect(listed.at(-1)?.id).toBe('n249');
+    expect(out.structured.notice).toBe(
+      'parent holds no records. It nests 260 tables; call again with subregistry set to one of the listed ids. Showing the first 250 of 260 sub-registries.',
+    );
+  });
+
+  it('prints an untitled table without a dangling dash, in the header and in a listing', async () => {
+    boot('address-space', UNTITLED_XML);
+    const out = await call({ registry: 'address-space' });
+    expect(out.text.split('\n')).toContain('**Sub-registry:** address-space-1');
+    expect(out.text).not.toMatch(/ — $/m);
+
+    boot(
+      'untitled-listing',
+      registryXml({
+        id: 'untitled-listing',
+        body: `<registry id="u1">${recordXml({ value: '1' })}</registry>${subregistryXml('u2', recordXml({ value: '2' }))}`,
+      }),
+    );
+    const listing = await call({ registry: 'untitled-listing' });
+    expect(listing.text.split('\n')).toContain('- u1 (1 records)');
+    expect(listing.text).not.toMatch(/ — $| — {2}\(/m);
+  });
+});
+
+/** An Ethertype shape: a first-column key holding decimal ranges, the hex form in another column. */
+const ETHERTYPE_XML = registryXml({
+  id: 'ethertypes',
+  body: [
+    recordXml({ type_decimal: '0000-1500', type_hex: '0000-05DC', description: 'Length Field' }),
+    recordXml({ type_decimal: '2048', type_hex: '0800', description: 'IPv4' }),
+    recordXml({ type_decimal: '34525', type_hex: '86DD', description: 'IPv6' }),
+  ].join(''),
+});
+
+/** A TLS cipher-suite shape: two-byte hex keys, a second-byte range row, and a sibling table. */
+const SUITES_XML = registryXml({
+  id: 'suites-registry',
+  body:
+    subregistryXml(
+      'suites',
+      [
+        recordXml({ value: '0x00,0x13', description: 'TLS_DHE_DSS_WITH_3DES_EDE_CBC_SHA' }),
+        recordXml({ value: '0x00,0x5D-5F', description: 'Unassigned' }),
+        recordXml({ value: '0x13,0x01', description: 'TLS_AES_128_GCM_SHA256' }),
+        recordXml({ value: '0x13,0x02', description: 'TLS_AES_256_GCM_SHA384' }),
+      ].join(''),
+    ) + subregistryXml('other', recordXml({ value: '1' })),
+});
+
+/** An HTTP/2 frame-type shape: single hex keys and hex range rows. */
+const FRAMES_XML = registryXml({
+  id: 'frames',
+  body: ['0x00', '0x01', '0x0d-0x0f', '0x10', '0x11-0xff']
+    .map((value, index) => recordXml({ value, description: `frame ${index}` }))
+    .join(''),
+});
+
+/** A decimal key column with the hex form in another column, `code`. */
+const CODES_XML = registryXml({
+  id: 'codes-registry',
+  body: [
+    recordXml({ value: '4865', code: '0x13,0x01', description: 'TLS_AES_128_GCM_SHA256' }),
+    recordXml({ value: '4866', code: '0x13,0x02', description: 'TLS_AES_256_GCM_SHA384' }),
+    recordXml({ value: '5', code: '0x05', description: 'one byte' }),
+  ].join(''),
+});
+
+describe('iana_get_registry_records: field', () => {
+  it('matches value against the named column instead of the key column, case-insensitively', async () => {
+    boot('ethertypes', ETHERTYPE_XML);
+    const out = await call({ registry: 'ethertypes', field: 'TYPE_HEX', value: '86dd' });
+    expect(out.structured).toMatchObject({ value_field: 'type_decimal', totalCount: 1 });
+    expect(records(out)[0]?.fields.description).toBe('IPv6');
+    expect(values(out)).toEqual(['34525']);
+    expect(values(await call({ registry: 'ethertypes', value: '1024' }))).toEqual(['0000-1500']);
+  });
+
+  it('finds a one-letter mnemonic that contains cannot express', async () => {
+    boot('rr-registry', RR_XML);
+    const out = await call({ registry: 'rr-registry', field: 'type', value: 'A' });
+    expect(values(out)).toEqual(['1']);
+    const miss = await call({ registry: 'rr-registry', value: 'AAAA' });
+    expect(miss.structured).toMatchObject({
+      records: [],
+      notice:
+        'No record in rr-types has value "AAAA". Column type (1 row) holds "AAAA"; call again with field set to type.',
+    });
+  });
+
+  it('returns every row of a name, the port-less one included, while a key lookup by name misses', async () => {
+    boot('service-registry', SERVICE_XML);
+    const miss = await call({ registry: 'service-registry', value: 'https' });
+    expect(miss.structured).toMatchObject({
+      records: [],
+      totalCount: 0,
+      notice:
+        'No record in service-registry has number "https". Columns name (4 rows) and description (2 rows) hold "https"; call again with field set to one of those columns.',
+    });
+    const all = await call({ registry: 'service-registry', field: 'name', value: 'HTTPS' });
+    expect(records(all).map((row) => row.fields.protocol)).toEqual(['tcp', 'udp', 'sctp', 'none']);
+    expect(values(all)).toEqual(['443', '443', '443', undefined]);
+    expect(all.text).toContain('#### Record 4\n> **name:** https\n> **protocol:** none');
+    expect(missingFromText(all.structured, all.text)).toEqual([]);
+  });
+
+  it('lists the columns holding a missed value by their matching-row count, most first, with each count', async () => {
+    boot(
+      'description-first',
+      registryXml({
+        id: 'description-first',
+        body: [
+          recordXml({ description: 'https', number: '1' }),
+          recordXml({ name: 'https', number: '443', protocol: 'tcp' }),
+          recordXml({ name: 'https', number: '443', protocol: 'udp' }),
+        ].join(''),
+      }),
+    );
+    const out = await call({ registry: 'description-first', value: 'https' });
+    expect(out.structured).toMatchObject({
+      columns: ['description', 'number', 'name', 'protocol'],
+      totalCount: 0,
+      notice:
+        'No record in description-first has number "https". Columns name (2 rows) and description (1 row) hold "https"; call again with field set to one of those columns.',
+    });
+    expect(out.text).toContain('Columns name (2 rows) and description (1 row) hold "https"');
+  });
+
+  it('names only the columns that hold the value in records that also pass contains', async () => {
+    boot('service-registry', SERVICE_XML);
+    const out = await call({ registry: 'service-registry', value: 'https', contains: 'tls' });
+    expect(out.structured.notice).toBe(
+      'No record in service-registry has number "https" and contains "tls". Column name (2 rows) holds "https"; call again with field set to name.',
+    );
+  });
+
+  it('keeps the plain miss hint when no other column holds the value, naming the field it matched', async () => {
+    boot('service-registry', SERVICE_XML);
+    const out = await call({ registry: 'service-registry', field: 'name', value: 'zzz' });
+    expect(out.structured.notice).toBe(
+      'No record in service-registry has name "zzz". Drop value, or check the column names listed in columns.',
+    );
+    const keyed = await call({ registry: 'service-registry', field: 'name', value: '443' });
+    expect(keyed.structured.notice).toBe(
+      'No record in service-registry has name "443". Column number (3 rows) holds "443"; call again with field set to number.',
+    );
+  });
+
+  it('fails unknown_field naming the columns when field is not one of them', async () => {
+    boot('service-registry', SERVICE_XML);
+    const out = await call({ registry: 'service-registry', field: 'port', value: '443' });
+    expect(out.isError).toBe(true);
+    const hint =
+      'Call iana_get_registry_records again with field set to one of: name, protocol, number, description.';
+    expect(errorOf(out)).toMatchObject({
+      code: JsonRpcErrorCode.NotFound,
+      message: '"port" is not a column of service-registry.',
+      data: {
+        reason: 'unknown_field',
+        registry: 'service-registry',
+        field: 'port',
+        columns: ['name', 'protocol', 'number', 'description'],
+        recovery: { hint },
+      },
+    });
+    expect(out.text).toContain(`Recovery: ${hint}`);
+    expect(out.text).toContain('reason unknown_field');
+
+    boot();
+    const sub = errorOf(await alpha({ field: 'nope', value: '1' }));
+    expect(sub.data).toMatchObject({ reason: 'unknown_field', subregistry: 'alpha' });
+  });
+
+  it('fails unknown_field on a table without columns, telling the caller to drop field', async () => {
+    boot(
+      'fieldless',
+      registryXml({
+        id: 'fieldless',
+        body: subregistryXml('bare', '<record><xref type="rfc" data="rfc9999"/></record>'),
+      }),
+    );
+    const out = await call({ registry: 'fieldless', subregistry: 'bare', field: 'x', value: 'y' });
+    expect(errorOf(out).data).toMatchObject({
+      reason: 'unknown_field',
+      columns: [],
+      recovery: {
+        hint: 'bare has no columns; call iana_get_registry_records again without field.',
+      },
+    });
+  });
+
+  it('escapes the field and table id in the unknown_field message', async () => {
+    boot('service-registry', SERVICE_XML);
+    const out = await call({ registry: 'service-registry', field: '[x](y)\n# H', value: '1' });
+    expect(errorOf(out).message).toBe(
+      String.raw`"\[x\](y) # H" is not a column of service-registry.`,
+    );
+  });
+
+  it('ignores field without value, with a notice', async () => {
+    boot('service-registry', SERVICE_XML);
+    const out = await call({ registry: 'service-registry', field: 'nonexistent' });
+    expect(out.isError).toBe(false);
+    expect(out.structured).toMatchObject({
+      totalCount: 6,
+      notice: 'field applies only with value; it was ignored.',
+    });
+  });
+
+  it('reports an empty table rather than an unknown field', async () => {
+    boot(
+      'half-hollow',
+      registryXml({
+        id: 'half-hollow',
+        body: `${subregistryXml('full', recordXml({ value: '1' }))}${subregistryXml('empty', '')}`,
+      }),
+    );
+    const out = await call({
+      registry: 'half-hollow',
+      subregistry: 'empty',
+      field: 'x',
+      value: '1',
+    });
+    expect(out.structured).toMatchObject({ records: [], notice: 'empty holds no records.' });
+  });
+
+  it.each([
+    ['a field over 100 characters', { field: 'f'.repeat(101), value: '1' }],
+    ['an array field', { field: ['name'], value: '1' }],
+  ])('rejects %s as invalid arguments', async (_label, extra) => {
+    const s = boot();
+    const out = await alpha(extra);
+    expect(errorOf(out).data.reason).toBe('invalid_arguments');
+    expect(s.fetches()).toBe(0);
+  });
+
+  it('accepts a 100-character field as input and answers it as an unknown column', async () => {
+    boot();
+    const out = await alpha({ field: 'f'.repeat(100), value: '1' });
+    expect(errorOf(out).data.reason).toBe('unknown_field');
+  });
+
+  it('reads a blank field as unset', async () => {
+    boot();
+    const out = await alpha({ field: '  ', value: '1' });
+    expect(values(out)).toEqual(['1']);
+    expect(out.structured).not.toHaveProperty('notice');
+  });
+
+  it('binds the cursor to field, case-insensitively', async () => {
+    boot('service-registry', SERVICE_XML);
+    const first = await call({
+      registry: 'service-registry',
+      field: 'name',
+      value: 'https',
+      limit: 2,
+    });
+    expect(values(first)).toEqual(['443', '443']);
+    const cursor = first.structured.next_cursor;
+    const next = await call({
+      registry: 'service-registry',
+      field: 'NAME',
+      value: 'https',
+      limit: 2,
+      cursor,
+    });
+    expect(records(next).map((row) => row.fields.protocol)).toEqual(['sctp', 'none']);
+    for (const changes of [{ field: 'description' }, { field: undefined }]) {
+      const out = await call({
+        registry: 'service-registry',
+        value: 'https',
+        limit: 2,
+        cursor,
+        ...changes,
+      });
+      expect(errorOf(out).data.reason).toBe('cursor_mismatch');
+    }
+  });
+
+  it('accepts a cursor the previous release minted without contains, and refuses one it minted with contains', async () => {
+    const s = boot('rr-registry', RR_XML);
+    s.serve({ [registryXmlUrl('service-registry')]: () => xmlResponse(SERVICE_XML) });
+    const plain = await call({ registry: 'rr-registry', limit: 2 });
+    const previousPlain = reMint(plain.structured.next_cursor as string, {
+      q: previousReleaseKey(['rr-registry', 'rr-types', '', '']),
+    });
+    expect(
+      values(await call({ registry: 'rr-registry', limit: 2, cursor: previousPlain })),
+    ).toEqual(['3', '4']);
+
+    const keyed = await call({ registry: 'service-registry', value: '443', limit: 1 });
+    const previousKeyed = reMint(keyed.structured.next_cursor as string, {
+      q: previousReleaseKey(['service-registry', 'service-registry', '443', '']),
+    });
+    const keyedNext = await call({
+      registry: 'service-registry',
+      value: '443',
+      limit: 1,
+      cursor: previousKeyed,
+    });
+    expect(records(keyedNext).map((row) => row.fields.protocol)).toEqual(['udp']);
+
+    const ranked = await call({ registry: 'rr-registry', contains: 'MX', limit: 2 });
+    const previousRanked = reMint(ranked.structured.next_cursor as string, {
+      q: previousReleaseKey(['rr-registry', 'rr-types', '', 'MX']),
+    });
+    const refused = await call({
+      registry: 'rr-registry',
+      contains: 'MX',
+      limit: 2,
+      cursor: previousRanked,
+    });
+    expect(errorOf(refused)).toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: { reason: 'cursor_mismatch' },
+    });
+    expect(refused.text).toContain('Recovery: Call iana_get_registry_records again without cursor');
+    const current = await call({
+      registry: 'rr-registry',
+      contains: 'MX',
+      limit: 2,
+      cursor: ranked.structured.next_cursor,
+    });
+    expect(records(current).map((row) => row.fields.type)).toEqual(['MF', 'MAILA']);
+  });
+});
+
+/** A port-registry shape whose port-less rows hold a port number in other columns. */
+const KEYLESS_PORTS_XML = registryXml({
+  id: 'keyless-ports',
+  body: [
+    recordXml({ name: 'https', protocol: 'tcp', number: '443', description: 'http over TLS' }),
+    recordXml({ name: 'https', protocol: 'udp', number: '443', description: 'http over TLS' }),
+    recordXml({ name: '443', protocol: 'none', description: 'tls reserved' }),
+    recordXml({ name: 'alt', protocol: 'none', description: '443' }),
+    recordXml({ name: 'ldaps', protocol: 'tcp', number: '636', description: 'ldap over TLS' }),
+  ].join(''),
+});
+
+/**
+ * An IPP keyword shape, nested below a sub-registry: attribute rows without a
+ * `value` cell beside the attribute's value rows.
+ */
+const IPP_XML = registryXml({
+  id: 'ipp-shaped',
+  body: subregistryXml(
+    'ipp-attributes',
+    recordXml({ attribute: 'media', value: 'na_letter' }) +
+      subregistryXml(
+        'ipp-keywords',
+        [
+          recordXml({ attribute: 'job-save-disposition-supported', syntax: 'type2 keyword' }),
+          recordXml({ attribute: 'job-save-disposition-supported', value: 'save-disposition' }),
+          recordXml({ attribute: 'save-disposition', syntax: 'type2 keyword' }),
+          recordXml({ attribute: 'media-col', value: 'stitching-reference-edge' }),
+          recordXml({ attribute: 'stitching-reference-edge', syntax: 'type2 keyword' }),
+          recordXml({ attribute: 'x-edge', syntax: 'stitching-reference-edge' }),
+          recordXml({ attribute: 'y-edge', syntax: 'stitching-reference-edge' }),
+        ].join(''),
+      ),
+  ),
+});
+
+describe('iana_get_registry_records: rows without a key cell on a key hit', () => {
+  const keywords = (extra: Record<string, unknown>) =>
+    call({ registry: 'ipp-shaped', subregistry: 'ipp-keywords', ...extra });
+
+  it('names the column holding the value in rows without a key cell, with its count, and field reaches them', async () => {
+    boot('ipp-shaped', IPP_XML);
+    const out = await keywords({ value: 'save-disposition' });
+    const notice =
+      'Rows with no value cell are left out of a key match, and column attribute (1 row) holds "save-disposition" in them; call again with field set to attribute to include them.';
+    expect(out.structured).toMatchObject({
+      subregistry_id: 'ipp-keywords',
+      value_field: 'value',
+      totalCount: 1,
+      records: [{ value: 'save-disposition' }],
+      notice,
+    });
+    expect(out.text).toContain(notice);
+    const reached = await keywords({ value: 'save-disposition', field: 'attribute' });
+    expect(records(reached)).toEqual([
+      { fields: { attribute: 'save-disposition', syntax: 'type2 keyword' }, references: [] },
+    ]);
+    expect(reached.structured).not.toHaveProperty('notice');
+  });
+
+  it('orders several holding columns by their row count, most first', async () => {
+    boot('ipp-shaped', IPP_XML);
+    const out = await keywords({ value: 'stitching-reference-edge' });
+    expect(out.structured).toMatchObject({
+      totalCount: 1,
+      notice:
+        'Rows with no value cell are left out of a key match, and columns syntax (2 rows) and attribute (1 row) hold "stitching-reference-edge" in them; call again with field set to one of those columns to include them.',
+    });
+  });
+
+  it('counts only the rows that also pass contains, and stays silent when none holds the value', async () => {
+    boot('keyless-ports', KEYLESS_PORTS_XML);
+    const port = (extra: Record<string, unknown>) => call({ registry: 'keyless-ports', ...extra });
+    const both = await port({ value: '443' });
+    expect(values(both)).toEqual(['443', '443']);
+    expect(both.structured.notice).toBe(
+      'Rows with no number cell are left out of a key match, and columns name (1 row) and description (1 row) hold "443" in them; call again with field set to one of those columns to include them.',
+    );
+    const tls = await port({ value: '443', contains: 'tls' });
+    expect(tls.structured.notice).toBe(
+      'Rows with no number cell are left out of a key match, and column name (1 row) holds "443" in them; call again with field set to name to include them.',
+    );
+    const reserved = await port({ value: '443', contains: 'reserved' });
+    expect(reserved.structured).toMatchObject({ totalCount: 0, records: [] });
+    expect(reserved.structured.notice).toBe(
+      'No record in keyless-ports has number "443" and contains "reserved". Column name (1 row) holds "443"; call again with field set to name.',
+    );
+    const ldaps = await port({ value: '636' });
+    expect(values(ldaps)).toEqual(['636']);
+    expect(ldaps.structured).not.toHaveProperty('notice');
+  });
+
+  it('adds nothing when field names the column, the key column included', async () => {
+    boot('keyless-ports', KEYLESS_PORTS_XML);
+    for (const field of ['number', 'NAME']) {
+      const out = await call({ registry: 'keyless-ports', field, value: '443' });
+      expect(out.isError).toBe(false);
+      expect(out.structured).not.toHaveProperty('notice');
+    }
+  });
+
+  it('adds nothing to a hit in a table where every row has a key cell', async () => {
+    boot('rr-registry', RR_XML);
+    const out = await call({ registry: 'rr-registry', value: '15' });
+    expect(values(out)).toEqual(['15']);
+    expect(out.structured).not.toHaveProperty('notice');
+  });
+
+  it('keeps the notice beside a limit cut and on a cursor past the end', async () => {
+    boot('keyless-ports', KEYLESS_PORTS_XML);
+    const first = await call({ registry: 'keyless-ports', value: '443', limit: 1 });
+    expect(first.structured).toMatchObject({ shown: 1, truncated: true });
+    expect(first.structured.notice).toMatch(
+      /^Rows with no number cell are left out of a key match, .* to include them\. 1 more records match; pass next_cursor/,
+    );
+    const past = reMint(first.structured.next_cursor as string, { offset: 9 });
+    const out = await call({ registry: 'keyless-ports', value: '443', limit: 1, cursor: past });
+    expect(out.structured).toMatchObject({ records: [], totalCount: 2 });
+    expect(out.structured.notice).toContain('Rows with no number cell are left out of a key match');
+    expect(out.structured.notice).toContain("The cursor's offset 9 is past the 2 matching records");
+  });
+});
+
+describe('iana_get_registry_records: hex code points', () => {
+  it.each(['0x1301', '{0x13,0x01}', '0x13 0x01', '{0x13, 0x01}', '0X13,0X01', ' 0x13 , 0x01 '])(
+    'finds 0x13,0x01 from %j',
+    async (value) => {
+      boot('suites-registry', SUITES_XML);
+      const out = await call({ registry: 'suites-registry', subregistry: 'suites', value });
+      expect(values(out)).toEqual(['0x13,0x01']);
+    },
+  );
+
+  it.each(['0x13', '1301', '{0x13,0x01', '0x13,,0x01', '0x00,0x5D'])(
+    'finds nothing for %j',
+    async (value) => {
+      boot('suites-registry', SUITES_XML);
+      const out = await call({ registry: 'suites-registry', subregistry: 'suites', value });
+      expect(values(out)).toEqual([]);
+    },
+  );
+
+  it('matches a second-byte range row by its exact text only', async () => {
+    boot('suites-registry', SUITES_XML);
+    const out = await call({
+      registry: 'suites-registry',
+      subregistry: 'suites',
+      value: '0x00,0x5d-5f',
+    });
+    expect(values(out)).toEqual(['0x00,0x5D-5F']);
+  });
+
+  it('matches a single hex value against hex range rows by numeric bounds', async () => {
+    boot('frames', FRAMES_XML);
+    const frame = async (value: string) => values(await call({ registry: 'frames', value }));
+    expect(await frame('0x25')).toEqual(['0x11-0xff']);
+    expect(await frame('{0x25}')).toEqual(['0x11-0xff']);
+    expect(await frame('0x0025')).toEqual(['0x11-0xff']);
+    expect(await frame('0x0E')).toEqual(['0x0d-0x0f']);
+    expect(await frame('0x0d')).toEqual(['0x0d-0x0f']);
+    expect(await frame('0xff')).toEqual(['0x11-0xff']);
+    expect(await frame('0x10')).toEqual(['0x10']);
+    expect(await frame('0x100')).toEqual([]);
+    expect(await frame('0x00,0x25')).toEqual([]);
+    expect(await frame('37')).toEqual([]);
+    expect(await frame('0x0d-0x0f')).toEqual(['0x0d-0x0f']);
+  });
+
+  it('compares one 0x token with a one-token cell by number, ignoring leading zeros', async () => {
+    boot('frames', FRAMES_XML);
+    const frame = async (value: string) => values(await call({ registry: 'frames', value }));
+    expect(await frame('0x1')).toEqual(['0x01']);
+    expect(await frame('{0x001}')).toEqual(['0x01']);
+    expect(await frame('0x0')).toEqual(['0x00']);
+    expect(await frame('0x000')).toEqual(['0x00']);
+    expect(await frame('0X010')).toEqual(['0x10']);
+    expect(await frame('1')).toEqual([]);
+    const out = await call({ registry: 'frames', value: '0x1' });
+    expect(out.structured).toMatchObject({ totalCount: 1, records: [{ value: '0x01' }] });
+    expect(out.text).toContain('#### 0x01\n> **description:** frame 1');
+  });
+
+  it('keeps comparing a multi-token form by its digits as written', async () => {
+    boot('suites-registry', SUITES_XML);
+    const suite = async (value: string) =>
+      values(await call({ registry: 'suites-registry', subregistry: 'suites', value }));
+    expect(await suite('0x13,0x1')).toEqual([]);
+    expect(await suite('0x01301')).toEqual([]);
+    expect(await suite('0x0013')).toEqual(['0x00,0x13']);
+    expect(await suite('0x13')).toEqual([]);
+  });
+
+  it('compares one 0x token by number in a non-key column named by field', async () => {
+    boot('codes-registry', CODES_XML);
+    const code = async (value: string) =>
+      values(await call({ registry: 'codes-registry', field: 'code', value }));
+    expect(await code('0x5')).toEqual(['5']);
+    expect(await code('0x005')).toEqual(['5']);
+    expect(await code('5')).toEqual([]);
+  });
+
+  it('matches hex forms in a column named by field', async () => {
+    boot('suites-registry', SUITES_XML);
+    const out = await call({
+      registry: 'suites-registry',
+      subregistry: 'suites',
+      field: 'value',
+      value: '0x1302',
+    });
+    expect(values(out)).toEqual(['0x13,0x02']);
+  });
+
+  it('matches hex forms in a non-key column named by field, by the digits as written', async () => {
+    boot('codes-registry', CODES_XML);
+    const code = async (value: string) =>
+      values(await call({ registry: 'codes-registry', field: 'code', value }));
+    expect(await code('0x1302')).toEqual(['4866']);
+    expect(await code('{0x13, 0x01}')).toEqual(['4865']);
+    expect(await code('0X13 0X02')).toEqual(['4866']);
+    expect(await code('0x13')).toEqual([]);
+    expect(await code('4866')).toEqual([]);
+    const keyed = await call({ registry: 'codes-registry', value: '0x1302' });
+    expect(keyed.structured).toMatchObject({ value_field: 'value', totalCount: 0 });
+  });
+});
+
+describe('iana_get_registry_records: contains ranking', () => {
+  it('lists records with a field equal to the query first, then registry order', async () => {
+    boot('rr-registry', RR_XML);
+    const out = await call({ registry: 'rr-registry', contains: 'mx' });
+    expect(records(out).map((row) => row.fields.type)).toEqual(['MX', 'MD', 'MF', 'MAILA']);
+    expect(out.text.indexOf('#### 15')).toBeLessThan(out.text.indexOf('#### 3'));
+  });
+
+  it('pages the ranked list: each record once, the last page short', async () => {
+    boot('rr-registry', RR_XML);
+    const seen: (string | undefined)[] = [];
+    let cursor: string | undefined;
+    let pages = 0;
+    do {
+      const out = await call({
+        registry: 'rr-registry',
+        contains: 'MX',
+        limit: 3,
+        ...(cursor ? { cursor } : {}),
+      });
+      seen.push(...records(out).map((row) => row.fields.type));
+      cursor = out.structured.next_cursor as string | undefined;
+      pages++;
+    } while (cursor);
+    expect(pages).toBe(2);
+    expect(seen).toEqual(['MX', 'MD', 'MF', 'MAILA']);
+  });
+
+  it('ranks the whole match list before cutting a page: limit 2 gives MX and MD, then MF and MAILA', async () => {
+    boot('rr-registry', RR_XML);
+    const ranked = (cursor?: unknown) =>
+      call({ registry: 'rr-registry', contains: 'MX', limit: 2, ...(cursor ? { cursor } : {}) });
+    const first = await ranked();
+    expect(records(first).map((row) => row.fields.type)).toEqual(['MX', 'MD']);
+    const second = await ranked(first.structured.next_cursor);
+    expect(records(second).map((row) => row.fields.type)).toEqual(['MF', 'MAILA']);
+    expect(second.structured).toMatchObject({ totalCount: 4, shown: 2 });
+    expect(second.structured).not.toHaveProperty('next_cursor');
+  });
+
+  it('answers a ranked cursor past the end with the start-over notice', async () => {
+    boot('rr-registry', RR_XML);
+    const first = await call({ registry: 'rr-registry', contains: 'MX', limit: 3 });
+    const past = reMint(first.structured.next_cursor as string, { offset: 40 });
+    const out = await call({ registry: 'rr-registry', contains: 'MX', limit: 3, cursor: past });
+    expect(out.structured).toMatchObject({
+      records: [],
+      totalCount: 4,
+      notice:
+        "The cursor's offset 40 is past the 4 matching records; call again without cursor to start over.",
+    });
+  });
+
+  it('keeps registry order without contains', async () => {
+    boot('rr-registry', RR_XML);
+    expect(
+      records(await call({ registry: 'rr-registry', limit: 3 })).map((row) => row.fields.type),
+    ).toEqual(['A', 'NS', 'MD']);
+  });
+});
+
+describe('iana_get_registry_records: filters on a listing', () => {
+  it('says value was not applied when no sub-registry is chosen', async () => {
+    boot('suites-registry', SUITES_XML);
+    const out = await call({ registry: 'suites-registry', value: '0x13,0x01' });
+    expect(out.structured).toMatchObject({
+      records: [],
+      subregistries: [
+        { id: 'suites', title: 'suites title', record_count: 4 },
+        { id: 'other', title: 'other title', record_count: 1 },
+      ],
+      notice:
+        'This registry has 2 sub-registries; call again with subregistry set to one of the listed ids. value was not applied; filters apply only to the records of one sub-registry.',
+    });
+    expect(out.text).toContain('value was not applied');
+  });
+
+  it('names every filter given', async () => {
+    boot();
+    const two = await call({ registry: 'example-parameters', value: '1', contains: 'alpha' });
+    expect(two.structured.notice).toContain(
+      'value and contains were not applied; filters apply only to the records of one sub-registry.',
+    );
+    const three = await call({
+      registry: 'example-parameters',
+      value: '1',
+      contains: 'alpha',
+      field: 'name',
+    });
+    expect(three.structured.notice).toContain('value, contains, and field were not applied;');
+    const fieldOnly = await call({ registry: 'example-parameters', field: 'name' });
+    expect(fieldOnly.structured.notice).toContain('field was not applied;');
   });
 });
 
@@ -2009,7 +3184,12 @@ describe('iana_get_registry_records: format()', () => {
     );
     expect(out.text).toContain('**Registered:** 2019-04-01');
     expect(out.text).toContain('- 1234 (rfc-errata) <https://www.rfc-editor.org/errata/eid1234>');
-    expect(out.text).toContain('#### no-value-column');
+    expect(out.text).toContain(
+      '#### Record 2\n> **name:** no-value-column\n> **description:** Sparse record',
+    );
+    expect(out.text).toContain(
+      '**Sub-registries (1):**\n- alpha-deep — Alpha Deep Values (1 records)',
+    );
     expect(out.text).toContain('**Source:** `example-parameters` · registry updated 2026-08-30');
   });
 
@@ -2025,6 +3205,30 @@ describe('iana_get_registry_records: format()', () => {
       '#### Record 3\n**References:**\n- RFC 9999 (rfc) <https://www.rfc-editor.org/rfc/rfc9999.html>',
     );
     expect(out.text).toContain('#### Record 4');
+  });
+
+  it('numbers a record without a key by its place in the whole match list, on every page', async () => {
+    boot();
+    const first = await alpha({ limit: 2 });
+    expect(first.structured).not.toHaveProperty('offset');
+    expect(first.text).toContain('#### Record 2\n> **name:** no-value-column');
+    const second = await alpha({ limit: 2, cursor: first.structured.next_cursor });
+    expect(second.structured).toMatchObject({ offset: 2, shown: 2, totalCount: 6 });
+    expect(second.text).toContain('**Offset:** 2');
+    expect(second.text).toContain(
+      '#### Record 3\n**References:**\n- RFC 9999 (rfc) <https://www.rfc-editor.org/rfc/rfc9999.html>',
+    );
+    expect(second.text).toContain('#### Record 4');
+    expect(second.text).not.toContain('#### Record 1');
+    expect(missingFromText(second.structured, second.text)).toEqual([]);
+    const third = await alpha({ limit: 2, cursor: second.structured.next_cursor });
+    expect(third.structured).toMatchObject({ offset: 4 });
+    expect(values(third)).toEqual(['bindkey@example.org', '2']);
+
+    const past = reMint(first.structured.next_cursor as string, { offset: 40 });
+    const beyond = await alpha({ limit: 2, cursor: past });
+    expect(beyond.structured).toMatchObject({ offset: 40, records: [] });
+    expect(beyond.text).toContain('**Offset:** 40');
   });
 
   it('keeps hostile registry text verbatim in structuredContent and inert in format()', async () => {
@@ -2109,7 +3313,7 @@ describeFailureContract({
   recovery:
     'The IANA registry file could not be read; retry iana_get_registry_records in a minute.',
   unreadable: [
-    { label: 'an HTML page served as 200', attempts: 3, response: () => htmlResponse('<html/>') },
+    { label: 'an HTML page served as 200', attempts: 1, response: () => htmlResponse('<html/>') },
     {
       label: 'a body with no registry root',
       attempts: 3,

@@ -1,5 +1,6 @@
 /**
- * @fileoverview Tests for `MediaTemplateReader`: statements from a 200, the
+ * @fileoverview Tests for `MediaTemplateReader`: statements from a 200, IANA's
+ * "No registration template available." page read as `available: false`, the
  * best-effort contract (every failure but caller cancellation resolves
  * `{ fetched: false }`), the request shape, and the cache (successful reads
  * only, 24 h TTL without revalidation, LRU, no in-flight sharing). Upstream I/O
@@ -20,6 +21,8 @@ import {
   TEMPLATE_LABELLED,
   TEMPLATE_NO_LABELS,
   TEMPLATE_PERSON_MARKERS,
+  TEMPLATE_PLACEHOLDER,
+  TEMPLATE_QUOTING_PLACEHOLDER,
 } from '../../fixtures/media-registry.js';
 import {
   createHarness,
@@ -86,10 +89,11 @@ function setup(
 }
 
 describe('MediaTemplateReader: a successful read', () => {
-  it('returns the three statements with fetched: true', async () => {
+  it('returns the three statements with fetched: true, available: true', async () => {
     const s = setup();
     expect((await s.read(JSON_URL)).value).toEqual({
       fetched: true,
+      available: true,
       fileExtensions: '.json',
       intendedUsage: 'COMMON',
       deprecatedAliases: 'n/a',
@@ -97,10 +101,10 @@ describe('MediaTemplateReader: a successful read', () => {
     expect(s.urls()).toEqual([JSON_URL]);
   });
 
-  it('is fetched: true with no statements when the template has none of the labels', async () => {
+  it('is fetched and available with no statements when the template has none of the labels', async () => {
     const s = setup();
     s.state.answer = () => template(TEMPLATE_NO_LABELS);
-    expect((await s.read(JSON_URL)).value).toEqual({ fetched: true });
+    expect((await s.read(JSON_URL)).value).toEqual({ fetched: true, available: true });
   });
 
   it('never returns the invented contact data of a template', async () => {
@@ -112,10 +116,10 @@ describe('MediaTemplateReader: a successful read', () => {
   it('keeps hostile statement text verbatim (escaping is format()s job)', async () => {
     const s = setup();
     s.state.answer = () => template(TEMPLATE_HOSTILE);
-    const read = (await s.read(JSON_URL)).value;
-    expect(read?.fileExtensions).toBe(
-      '.evil\n# Forged heading\n- forged item\n[x](https://evil.example/)\n<b>bold</b>\u{202E}\u0007',
-    );
+    expect((await s.read(JSON_URL)).value).toMatchObject({
+      fileExtensions:
+        '.evil\n# Forged heading\n- forged item\n[x](https://evil.example/)\n<b>bold</b>\u{202E}\u0007',
+    });
   });
 
   it('sends one GET with the descriptive User-Agent and no conditional header', async () => {
@@ -134,7 +138,106 @@ describe('MediaTemplateReader: a successful read', () => {
     const s = setup();
     const head = 'File extension(s): .big\n\n';
     s.state.answer = () => template(head + 'x'.repeat(TEMPLATE_MAX_BYTES - head.length));
-    expect((await s.read(JSON_URL)).value).toEqual({ fetched: true, fileExtensions: '.big' });
+    expect((await s.read(JSON_URL)).value).toEqual({
+      fetched: true,
+      available: true,
+      fileExtensions: '.big',
+    });
+  });
+});
+
+describe("MediaTemplateReader: IANA's no-template page", () => {
+  const PLAIN_URL = `${BASE}text/plain`;
+  const QUOTING_URL = `${BASE}application/vnd.example.quoting`;
+  const MISSING_URL = `${BASE}application/vnd.example.missing`;
+
+  it('tells the placeholder, a real template, a template quoting the sentence, and a 404 apart, and caches every 200', async () => {
+    const s = setup();
+    const bodies: Record<string, () => Response> = {
+      [PLAIN_URL]: () => template(TEMPLATE_PLACEHOLDER),
+      [JSON_URL]: () => template(TEMPLATE_LABELLED),
+      [QUOTING_URL]: () => template(TEMPLATE_QUOTING_PLACEHOLDER),
+      [MISSING_URL]: () => statusResponse(404, {}, 'Page not found'),
+    };
+    s.state.answer = (request) => {
+      const answer = bodies[request.url];
+      if (!answer) throw new Error(`unscripted ${request.url}`);
+      return answer();
+    };
+    const expected = {
+      [PLAIN_URL]: { fetched: true, available: false },
+      [JSON_URL]: {
+        fetched: true,
+        available: true,
+        fileExtensions: '.json',
+        intendedUsage: 'COMMON',
+        deprecatedAliases: 'n/a',
+      },
+      [QUOTING_URL]: { fetched: true, available: true, fileExtensions: '.quo' },
+      [MISSING_URL]: { fetched: false },
+    };
+    for (const [url, value] of Object.entries(expected)) {
+      expect((await s.read(url)).value).toStrictEqual(value);
+    }
+    expect(s.urls()).toEqual([PLAIN_URL, JSON_URL, QUOTING_URL, MISSING_URL]);
+
+    for (const [url, value] of Object.entries(expected)) {
+      expect((await s.read(url)).value).toStrictEqual(value);
+    }
+    expect(s.urls()).toEqual([PLAIN_URL, JSON_URL, QUOTING_URL, MISSING_URL, MISSING_URL]);
+  });
+
+  it.each([
+    ['as served: 35 bytes, no newline', TEMPLATE_PLACEHOLDER],
+    ['with a trailing newline', `${TEMPLATE_PLACEHOLDER}\n`],
+    ['with surrounding whitespace and CRLF', ` \r\n\t${TEMPLATE_PLACEHOLDER}  \r\n`],
+  ])('reads the placeholder %s as available: false', async (_label, body) => {
+    const s = setup();
+    s.state.answer = () => template(body);
+    expect((await s.read(PLAIN_URL)).value).toStrictEqual({ fetched: true, available: false });
+  });
+
+  it.each([
+    ['without its period', 'No registration template available'],
+    ['in lowercase', 'no registration template available.'],
+    ['twice', `${TEMPLATE_PLACEHOLDER}\n${TEMPLATE_PLACEHOLDER}`],
+    ['followed by a label', `${TEMPLATE_PLACEHOLDER}\nFile extension(s): .x`],
+  ])('reads the sentence %s as a real template', async (_label, body) => {
+    const s = setup();
+    s.state.answer = () => template(body);
+    expect((await s.read(PLAIN_URL)).value).toMatchObject({ fetched: true, available: true });
+  });
+
+  it('keeps the statements of a template that follows the sentence with a label', async () => {
+    const s = setup();
+    s.state.answer = () => template(`${TEMPLATE_PLACEHOLDER}\nFile extension(s): .x`);
+    expect((await s.read(PLAIN_URL)).value).toStrictEqual({
+      fetched: true,
+      available: true,
+      fileExtensions: '.x',
+    });
+  });
+
+  it('expires a cached placeholder with the TTL like any read', async () => {
+    const s = setup();
+    s.state.answer = () => template(TEMPLATE_PLACEHOLDER);
+    await s.read(PLAIN_URL);
+    s.advance(TEMPLATE_TTL_MS);
+    s.state.answer = () => template(TEMPLATE_LABELLED);
+    expect((await s.read(PLAIN_URL)).value).toMatchObject({
+      fetched: true,
+      available: true,
+      fileExtensions: '.json',
+    });
+    expect(s.http.calls).toHaveLength(2);
+  });
+
+  it('hands out a fresh placeholder object per read, so a caller mutating it cannot change the cache', async () => {
+    const s = setup();
+    s.state.answer = () => template(TEMPLATE_PLACEHOLDER);
+    const first = (await s.read(PLAIN_URL)).value;
+    Object.assign(first ?? {}, { available: true, fileExtensions: 'tampered' });
+    expect((await s.read(PLAIN_URL)).value).toStrictEqual({ fetched: true, available: false });
   });
 });
 
@@ -146,17 +249,18 @@ describe('MediaTemplateReader: best effort', () => {
     expect(s.http.calls).toHaveLength(1);
   });
 
-  it('a 200 with the wrong content type resolves fetched: false, retried three times', async () => {
+  it('a 200 with the wrong content type resolves fetched: false after one request', async () => {
     const s = setup();
     s.state.answer = () => htmlResponse('<html>Moved</html>');
     expect((await s.read(JSON_URL)).value).toEqual({ fetched: false });
-    expect(s.http.calls).toHaveLength(3);
+    expect(s.http.calls).toHaveLength(1);
   });
 
-  it('a body over 256 KiB resolves fetched: false', async () => {
+  it('a body over 256 KiB resolves fetched: false after one request', async () => {
     const s = setup();
     s.state.answer = () => template(`File extension(s): .a\n${'x'.repeat(TEMPLATE_MAX_BYTES)}`);
     expect((await s.read(JSON_URL)).value).toEqual({ fetched: false });
+    expect(s.http.calls).toHaveLength(1);
   });
 
   it.each([
@@ -299,7 +403,7 @@ describe('MediaTemplateReader: cache', () => {
     const s = setup();
     s.state.answer = () => template(TEMPLATE_NO_LABELS);
     await s.read(JSON_URL);
-    expect((await s.read(JSON_URL)).value).toEqual({ fetched: true });
+    expect((await s.read(JSON_URL)).value).toEqual({ fetched: true, available: true });
     expect(s.http.calls).toHaveLength(1);
   });
 
@@ -399,8 +503,7 @@ describe('MediaTemplateReader: cache', () => {
     const s = setup();
     const first = (await s.read(JSON_URL)).value;
     if (!first) throw new Error('read did not resolve');
-    first.fileExtensions = 'tampered';
-    first.fetched = false;
+    Object.assign(first, { fetched: false, fileExtensions: 'tampered' });
     expect((await s.read(JSON_URL)).value).toMatchObject({
       fetched: true,
       fileExtensions: '.json',

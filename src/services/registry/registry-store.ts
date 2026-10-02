@@ -8,7 +8,9 @@
  * promise run under a server-scoped signal and its own 40 s deadline, so no
  * caller's cancellation fails the others; each caller waits within its own
  * budget. Curated sources are pinned; other XML registries sit in a
- * byte-weighted LRU.
+ * byte-weighted LRU. `source.url` names the file a model was parsed from, the
+ * last hop when a source URL redirects; a file reached that way and under its
+ * own id is cached once per id, each copy on its own clock.
  * @module services/registry/registry-store
  */
 
@@ -97,6 +99,8 @@ interface CacheEntry<T> {
   fetchedAt: number;
   lastModified?: string;
   model: T;
+  /** The URL whose 200 the model was parsed from, the last hop when the source URL redirects. */
+  url: string;
 }
 
 type LoadOutcome<T> =
@@ -127,6 +131,8 @@ export interface RegistryStoreOptions {
   client: UpstreamClient;
   /** Fresh window. Default {@link FRESH_MS}. */
   freshMs?: number;
+  /** Combined source bytes of the generic registries held at once. Default {@link GENERIC_MAX_BYTES}. */
+  genericMaxBytes?: number;
   /** Clock driving freshness, stale age, and the hold. Default `Date.now`. */
   now?: () => number;
   /** Oldest copy served when a refresh fails. Default {@link STALE_MAX_MS}. */
@@ -161,6 +167,7 @@ function xmlSpec(
 export class RegistryStore implements Disposable {
   readonly #client: UpstreamClient;
   readonly #freshMs: number;
+  readonly #genericMaxBytes: number;
   readonly #now: () => number;
   readonly #staleMaxMs: number;
   /** Aborted on dispose; every shared load runs under it. */
@@ -182,6 +189,7 @@ export class RegistryStore implements Disposable {
     this.#client = options.client;
     this.#now = options.now ?? Date.now;
     this.#freshMs = options.freshMs ?? FRESH_MS;
+    this.#genericMaxBytes = options.genericMaxBytes ?? GENERIC_MAX_BYTES;
     this.#staleMaxMs = options.staleMaxMs ?? STALE_MAX_MS;
 
     this.#curated = Object.fromEntries(
@@ -408,6 +416,7 @@ export class RegistryStore implements Disposable {
       kind: 'loaded',
       entry: {
         model: source.spec.parse(response.body, budget),
+        url: response.url,
         fetchedAt: this.#now(),
         bytes: response.bytes,
         ...(lastModified ? { lastModified } : {}),
@@ -432,7 +441,7 @@ export class RegistryStore implements Disposable {
       model: entry.model,
       source: {
         registry_id: source.key,
-        url: source.url,
+        url: entry.url,
         fetched_at: new Date(entry.fetchedAt).toISOString(),
         stale,
         ...(updated ? { registry_updated: updated } : {}),
@@ -458,7 +467,7 @@ export class RegistryStore implements Disposable {
     for (const [, generic] of cached) bytes += generic.entry?.bytes ?? 0;
     for (const [id, generic] of cached) {
       if (count <= 1) return;
-      if (count <= GENERIC_MAX_ENTRIES && bytes <= GENERIC_MAX_BYTES) return;
+      if (count <= GENERIC_MAX_ENTRIES && bytes <= this.#genericMaxBytes) return;
       this.#generic.delete(id);
       count--;
       bytes -= generic.entry?.bytes ?? 0;

@@ -20,6 +20,7 @@ import {
 import { registryXmlUrl } from '@/services/registry/registry-store.js';
 import {
   APPLICATION_RECORDS,
+  EXTENSION_XML,
   MEDIA_XML,
   mediaRecord,
   mediaXml,
@@ -29,6 +30,8 @@ import {
   TEMPLATE_NO_LABELS,
   TEMPLATE_NUMBERED,
   TEMPLATE_PERSON_MARKERS,
+  TEMPLATE_PLACEHOLDER,
+  TEMPLATE_QUOTING_PLACEHOLDER,
 } from '../fixtures/media-registry.js';
 import { DOCTYPE_XML, EMPTY_XML, WRONG_ROOT_XML } from '../fixtures/registry-xml.js';
 import { describeFailureContract } from '../shared/failure-contract.js';
@@ -48,6 +51,7 @@ const BASE = 'https://www.iana.org/assignments/media-types/';
 const tmpl = (path: string) => `${BASE}${path}`;
 
 interface Template {
+  available?: boolean;
   deprecated_aliases?: string;
   fetched: boolean;
   file_extensions?: string;
@@ -121,6 +125,18 @@ const types = (out: Out) => rows(out).map((row) => row.type);
 const templateFetches = (s: ReturnType<typeof boot>) =>
   s.fetched().filter((url) => url !== MEDIA_URL);
 
+/** The keyword-mode notice for a one-word keyword shaped like a file extension. */
+const extensionNotice = (keyword: string) =>
+  `If "${keyword}" is a file extension: keyword search reads registered type names, never file extensions; look up the type you expect with type to read its registration template's file-extension statement, when the template has one.`;
+
+/** The keyword-mode advice after a one-word miss that is not shaped like a file extension and has no top_level. */
+const ONE_WORD_MISS_ADVICE =
+  'Keyword matches whole words of registered type names; try part of the name, or split a joined word ("geo json" finds geo+json).';
+
+/** The type-mode notice for a type IANA publishes no registration template for. */
+const noTemplateNotice = (type: string) =>
+  `IANA publishes no registration template for ${type}; its defining documents are the references.`;
+
 describe('iana_lookup_media_type: exact type', () => {
   it('returns the registry fields and the template statements, with counters', async () => {
     const s = boot();
@@ -144,6 +160,7 @@ describe('iana_lookup_media_type: exact type', () => {
           updated: '2022-03-04',
           template: {
             fetched: true,
+            available: true,
             file_extensions: '.json',
             intended_usage: 'COMMON',
             deprecated_aliases: 'n/a',
@@ -212,6 +229,7 @@ describe('iana_lookup_media_type: exact type', () => {
         template_url: tmpl('image/emf'),
         template: {
           fetched: true,
+          available: true,
           file_extensions: 'kml\nand sometimes kmz',
           intended_usage: 'COMMON',
           deprecated_aliases: 'none',
@@ -413,6 +431,7 @@ describe('iana_lookup_media_type: registration template', () => {
     const labelled = rows(await call({ type: 'application/json' }))[0]?.template;
     expect(labelled).toEqual({
       fetched: true,
+      available: true,
       file_extensions: '.json',
       intended_usage: 'COMMON',
       deprecated_aliases: 'n/a',
@@ -420,6 +439,7 @@ describe('iana_lookup_media_type: registration template', () => {
     const numbered = rows(await call({ type: 'image/emf' }))[0]?.template;
     expect(numbered).toEqual({
       fetched: true,
+      available: true,
       file_extensions: 'kml\nand sometimes kmz',
       intended_usage: 'COMMON',
       deprecated_aliases: 'none',
@@ -427,13 +447,18 @@ describe('iana_lookup_media_type: registration template', () => {
     const s = boot();
     s.serve({ [tmpl('application/json')]: () => textResponse(TEMPLATE_BARE) });
     const bare = rows(await call({ type: 'application/json' }))[0]?.template;
-    expect(bare).toEqual({ fetched: true, file_extensions: 'ex1', intended_usage: 'LIMITED USE' });
+    expect(bare).toEqual({
+      fetched: true,
+      available: true,
+      file_extensions: 'ex1',
+      intended_usage: 'LIMITED USE',
+    });
   });
 
-  it('is fetched: true with no statement keys when the template lacks the labels', async () => {
+  it('is fetched and available with no statement keys when the template lacks the labels', async () => {
     boot();
     const out = await call({ type: 'text/plain' });
-    expect(rows(out)[0]?.template).toEqual({ fetched: true });
+    expect(rows(out)[0]?.template).toEqual({ fetched: true, available: true });
     expect(out.structured).not.toHaveProperty('notice');
   });
 
@@ -442,6 +467,15 @@ describe('iana_lookup_media_type: registration template', () => {
     await call({ type: 'application/json' });
     await call({ type: 'application/json' });
     expect(templateFetches(s)).toEqual([tmpl('application/json')]);
+  });
+
+  it('keeps the statements of a template that merely contains the no-template sentence, with no notice', async () => {
+    const s = boot();
+    s.serve({ [tmpl('text/plain')]: () => textResponse(TEMPLATE_QUOTING_PLACEHOLDER) });
+    const out = await call({ type: 'text/plain' });
+    expect(rows(out)[0]?.template).toMatchObject({ fetched: true, file_extensions: '.quo' });
+    expect(out.structured).not.toHaveProperty('notice');
+    expect(out.text).toContain('**Template read:** yes');
   });
 
   it('drops dot segments from a template path, so the read stays under media-types/', async () => {
@@ -490,6 +524,7 @@ describe('iana_lookup_media_type: registration template', () => {
     });
     const [row] = rows(out);
     expect(row?.template).toEqual({ fetched: false });
+    expect(row?.template).not.toHaveProperty('available');
     expect(row).toMatchObject({
       type: 'application/json',
       status: 'current',
@@ -576,6 +611,107 @@ describe('iana_lookup_media_type: registration template', () => {
   });
 });
 
+describe('iana_lookup_media_type: types with no registration template', () => {
+  it.each([
+    ['the 35-byte page as served', TEMPLATE_PLACEHOLDER],
+    ['the page with surrounding whitespace', `\r\n  ${TEMPLATE_PLACEHOLDER} \n\n`],
+  ])('reads %s as available: false, with a notice naming the type', async (_label, body) => {
+    const s = boot();
+    s.serve({ [tmpl('text/plain')]: () => textResponse(body) });
+    const out = await call({ type: 'text/plain' });
+    expect(out.isError).toBe(false);
+    expect(out.structured).toMatchObject({
+      found: true,
+      totalCount: 1,
+      shown: 1,
+      truncated: false,
+      notice: noTemplateNotice('text/plain'),
+    });
+    expect(rows(out)[0]?.template).toEqual({ fetched: true, available: false });
+    expect(rows(out)[0]).toMatchObject({ type: 'text/plain', template_url: tmpl('text/plain') });
+    expect(out.text).toContain(noTemplateNotice('text/plain'));
+  });
+
+  it.each([
+    [
+      'a template that merely contains the sentence',
+      TEMPLATE_QUOTING_PLACEHOLDER,
+      { file_extensions: '.quo' },
+    ],
+    ['the sentence without its period', 'No registration template available', {}],
+    ['the sentence in lowercase', 'no registration template available.', {}],
+    ['the sentence twice', `${TEMPLATE_PLACEHOLDER}\n${TEMPLATE_PLACEHOLDER}`, {}],
+  ])(
+    'reads %s as a real template: available: true, no notice',
+    async (_label, body, statements) => {
+      const s = boot();
+      s.serve({ [tmpl('text/plain')]: () => textResponse(body) });
+      const out = await call({ type: 'text/plain' });
+      expect(rows(out)[0]?.template).toEqual({ fetched: true, available: true, ...statements });
+      expect(out.structured).not.toHaveProperty('notice');
+    },
+  );
+
+  it('caches the no-template page like any read: a repeat call issues no template request', async () => {
+    const s = boot();
+    s.serve({ [tmpl('text/plain')]: () => textResponse(TEMPLATE_PLACEHOLDER) });
+    const first = await call({ type: 'text/plain' });
+    const second = await call({ type: 'text/plain' });
+    expect(templateFetches(s)).toEqual([tmpl('text/plain')]);
+    expect(rows(second)[0]?.template).toEqual({ fetched: true, available: false });
+    expect(second.structured.notice).toBe(first.structured.notice);
+  });
+
+  it('names the type once, in registry casing, however many records share it', async () => {
+    const s = boot();
+    s.serve({
+      [tmpl('application/vnd.example.dup')]: () => textResponse(TEMPLATE_PLACEHOLDER),
+      [tmpl('application/vnd.ms-excel.addin.macroEnabled.12')]: () =>
+        textResponse(TEMPLATE_PLACEHOLDER),
+    });
+    const dup = await call({ type: 'application/vnd.example.dup' });
+    expect(rows(dup).map((row) => row.template)).toEqual([
+      { fetched: true, available: false },
+      { fetched: true, available: false },
+    ]);
+    expect(dup.structured.notice).toBe(noTemplateNotice('application/vnd.example.dup'));
+    const mixed = await call({ type: 'application/vnd.ms-excel.addin.macroenabled.12' });
+    expect(mixed.structured.notice).toBe(
+      noTemplateNotice('application/vnd.ms-excel.addin.macroEnabled.12'),
+    );
+  });
+
+  it('puts the ignored-top_level and ignored-offset notices after it', async () => {
+    const s = boot();
+    s.serve({ [tmpl('text/plain')]: () => textResponse(TEMPLATE_PLACEHOLDER) });
+    const out = await call({ type: 'text/plain', top_level: 'image', offset: 3 });
+    expect(out.structured.notice).toBe(
+      `${noTemplateNotice('text/plain')} top_level applies to keyword mode only; it was ignored for this exact lookup. offset applies to keyword mode only; it was ignored for this exact lookup.`,
+    );
+  });
+
+  it('format() says no template is published, never "Template read: yes", and carries every field', async () => {
+    const s = boot();
+    s.serve({ [tmpl('text/plain')]: () => textResponse(TEMPLATE_PLACEHOLDER) });
+    const out = await call({ type: 'text/plain' });
+    expect(out.text).toContain(
+      '**Template published:** no — IANA publishes no registration template for this type; its defining documents are the references',
+    );
+    expect(out.text).not.toContain('**Template read:**');
+    expect(out.text).not.toContain('**File extensions:**');
+    expect(missingFromText(out.structured, out.text)).toEqual([]);
+  });
+
+  it('keyword mode reads no template, so it never reports one missing', async () => {
+    const s = boot();
+    s.serve({ [tmpl('text/plain')]: () => textResponse(TEMPLATE_PLACEHOLDER) });
+    const out = await call({ keyword: 'plain' });
+    expect(rows(out)[0]).not.toHaveProperty('template');
+    expect(out.structured).not.toHaveProperty('notice');
+    expect(templateFetches(s)).toEqual([]);
+  });
+});
+
 describe('iana_lookup_media_type: top_level', () => {
   it('is ignored in type mode, with a notice, even when the registry has no such sub-registry', async () => {
     boot();
@@ -629,21 +765,28 @@ describe('iana_lookup_media_type: top_level', () => {
     ]);
   });
 
-  it('names top_level in a keyword miss', async () => {
+  it('names top_level in a one-word keyword miss and says to drop it; a type named that word elsewhere means no extension notice', async () => {
     boot();
     const out = await call({ keyword: 'png', top_level: 'application' });
     expect(out.structured).toMatchObject({
       found: false,
       media_types: [],
       notice:
-        'No registered media type matched "png" in application. Try fewer words or drop top_level.',
+        'No registered media type matched "png" in application. Drop top_level to search every top-level type.',
     });
   });
 
   it('names top_level only when one was given', async () => {
     boot();
-    expect((await call({ keyword: 'zzzz' })).structured.notice).toBe(
-      'No registered media type matched "zzzz". Try fewer words.',
+    const notice = (await call({ keyword: 'zzzz' })).structured.notice;
+    expect(notice).toBe(`No registered media type matched "zzzz". ${extensionNotice('zzzz')}`);
+    expect(notice).not.toContain('top_level');
+  });
+
+  it('keeps "Try fewer words" with the drop-top_level advice for a multi-word miss', async () => {
+    boot();
+    expect((await call({ keyword: 'zzzz yyyy', top_level: 'image' })).structured.notice).toBe(
+      'No registered media type matched "zzzz yyyy" in image. Try fewer words or drop top_level.',
     );
   });
 
@@ -853,6 +996,242 @@ describe('iana_lookup_media_type: keyword', () => {
       cap: 1,
       shown: 1,
     });
+  });
+});
+
+describe('iana_lookup_media_type: file-extension keywords', () => {
+  const page = (
+    typesShown: string[],
+    counters: { cap?: number; next_offset?: number; shown?: number; total?: number } = {},
+  ) => ({
+    types: typesShown,
+    found: (counters.total ?? typesShown.length) > 0,
+    totalCount: counters.total ?? typesShown.length,
+    shown: counters.shown ?? typesShown.length,
+    cap: counters.cap ?? 25,
+    truncated: counters.next_offset !== undefined,
+    next_offset: counters.next_offset,
+  });
+  const IMAGES = [
+    'image/gif',
+    'image/jpeg',
+    'image/png',
+    'image/svg+xml',
+    'image/vnd.sealedmedia.softseal.jpg',
+  ];
+  const DOCS = [
+    'application/vnd.3gpp.seal-group-doc+xml',
+    'application/vnd.collection.doc+json',
+    'application/vnd.sealed.doc',
+  ];
+
+  it.each<[string, Record<string, unknown>, ReturnType<typeof page>]>([
+    ['jpg', { keyword: 'jpg' }, page(['image/vnd.sealedmedia.softseal.jpg'])],
+    ['JPG', { keyword: 'JPG' }, page(['image/vnd.sealedmedia.softseal.jpg'])],
+    ['svg', { keyword: 'svg' }, page(['image/svg+xml'])],
+    ['epub', { keyword: 'epub' }, page(['application/epub+zip'])],
+    [
+      'doc at limit 2',
+      { keyword: 'doc', limit: 2 },
+      page(DOCS.slice(0, 2), { cap: 2, total: 3, next_offset: 2 }),
+    ],
+    ['doc past the end', { keyword: 'doc', offset: 10 }, page([], { total: 3, shown: 0 })],
+    ['*.jpg', { keyword: '*.jpg' }, page(['image/vnd.sealedmedia.softseal.jpg'])],
+    ['mp3', { keyword: 'mp3' }, page([])],
+    ['.mp3', { keyword: '.mp3' }, page([])],
+    ['*.mp3', { keyword: '*.mp3' }, page([])],
+    ['mp3 in audio', { keyword: 'mp3', top_level: 'audio' }, page([])],
+    ['png', { keyword: 'png' }, page(['image/png'])],
+    ['png in application', { keyword: 'png', top_level: 'application' }, page([])],
+    [
+      'json',
+      { keyword: 'json' },
+      page(['application/json', 'application/vnd.collection.doc+json']),
+    ],
+    ['mpeg', { keyword: 'mpeg' }, page(['audio/mpeg'])],
+    ['image', { keyword: 'image' }, page(IMAGES)],
+    ['zzzzzz', { keyword: 'zzzzzz' }, page([])],
+    ['geojson', { keyword: 'geojson' }, page([])],
+    ['mp3 file', { keyword: 'mp3 file' }, page([])],
+  ])(
+    'leaves media_types, found, and every counter of %s as they were',
+    async (_label, input, expected) => {
+      boot(EXTENSION_XML);
+      const out = await call(input);
+      expect(out.isError).toBe(false);
+      const { types: expectedTypes, next_offset, ...counters } = expected;
+      expect(types(out)).toEqual(expectedTypes);
+      expect(out.structured).toMatchObject(counters);
+      if (next_offset === undefined) expect(out.structured).not.toHaveProperty('next_offset');
+      else expect(out.structured.next_offset).toBe(next_offset);
+    },
+  );
+
+  it.each([
+    ['jpg', 'jpg'],
+    ['JPG', 'JPG'],
+    ['*.jpg', '.jpg'],
+    ['svg', 'svg'],
+    ['epub', 'epub'],
+  ])(
+    'adds the extension notice to a hit on %s, whose word names no registered type or subtype',
+    async (keyword, extension) => {
+      boot(EXTENSION_XML);
+      const out = await call({ keyword });
+      expect(out.structured).toMatchObject({ found: true, notice: extensionNotice(extension) });
+      expect(out.text).toContain(extensionNotice(extension));
+    },
+  );
+
+  it.each([
+    ['mp3', 'mp3'],
+    ['.mp3', '.mp3'],
+    ['*.mp3', '.mp3'],
+    ['md', 'md'],
+    ['woff2', 'woff2'],
+  ])('adds it to the one-word miss %j, and drops "Try fewer words"', async (keyword, extension) => {
+    boot(EXTENSION_XML);
+    const out = await call({ keyword });
+    expect(out.structured).toMatchObject({
+      found: false,
+      notice: `No registered media type matched "${keyword}". ${extensionNotice(extension)}`,
+    });
+    expect(String(out.structured.notice)).not.toContain('Try fewer words');
+    expect(out.text).toContain(String(out.structured.notice));
+  });
+
+  it.each([
+    ['a miss', '*.mp3', `No registered media type matched "*.mp3". ${extensionNotice('.mp3')}`],
+    ['a hit', '*.jpg', extensionNotice('.jpg')],
+  ])(
+    'names a glob keyword on %s without its "*", so the rendered notice holds no "*" pair to read as emphasis',
+    async (_label, keyword, notice) => {
+      boot(EXTENSION_XML);
+      const out = await call({ keyword });
+      expect(out.structured.notice).toBe(notice);
+      expect(notice.split('*').length - 1).toBeLessThan(2);
+      expect(out.text).toContain(`> ${notice}`);
+    },
+  );
+
+  it.each(['png', 'PNG', '.png', 'json', 'mpeg', 'gif', 'plain', 'image', 'text', 'audio'])(
+    'stays quiet for %j, which a registered type or subtype is named',
+    async (keyword) => {
+      boot(EXTENSION_XML);
+      const out = await call({ keyword });
+      expect(out.structured).toMatchObject({ found: true });
+      expect(out.structured).not.toHaveProperty('notice');
+    },
+  );
+
+  it.each([
+    ['six letters', 'zzzzzz', `No registered media type matched "zzzzzz". ${ONE_WORD_MISS_ADVICE}`],
+    [
+      'a joined word over five letters',
+      'geojson',
+      `No registered media type matched "geojson". ${ONE_WORD_MISS_ADVICE}`,
+    ],
+    ['a trailing dot', 'mp3.', `No registered media type matched "mp3.". ${ONE_WORD_MISS_ADVICE}`],
+    [
+      'two leading dots',
+      '..mp3',
+      `No registered media type matched "..mp3". ${ONE_WORD_MISS_ADVICE}`,
+    ],
+    ['two stars', '**.mp3', `No registered media type matched "**.mp3". ${ONE_WORD_MISS_ADVICE}`],
+    ['a hyphen (two words)', 'mp-3', 'No registered media type matched "mp-3". Try fewer words.'],
+    ['two words', 'mp3 file', 'No registered media type matched "mp3 file". Try fewer words.'],
+  ])(
+    'stays quiet about extensions for a keyword with %s, still naming a next step',
+    async (_label, keyword, notice) => {
+      boot(EXTENSION_XML);
+      expect((await call({ keyword })).structured.notice).toBe(notice);
+    },
+  );
+
+  it('carries the one-word miss advice in both surfaces, and leaves it out when top_level gives the next step', async () => {
+    boot(EXTENSION_XML);
+    const out = await call({ keyword: 'geojson' });
+    expect(out.structured).toMatchObject({
+      found: false,
+      media_types: [],
+      totalCount: 0,
+      shown: 0,
+      truncated: false,
+      notice: `No registered media type matched "geojson". ${ONE_WORD_MISS_ADVICE}`,
+    });
+    expect(out.text).toContain(String(out.structured.notice));
+    expect((await call({ keyword: 'geojson', top_level: 'application' })).structured.notice).toBe(
+      'No registered media type matched "geojson" in application. Drop top_level to search every top-level type.',
+    );
+  });
+
+  it('stays quiet for an annotation word longer than five characters', async () => {
+    boot();
+    for (const keyword of ['obsoleted', 'deprecated']) {
+      const out = await call({ keyword });
+      expect(out.structured).toMatchObject({ found: true });
+      expect(out.structured).not.toHaveProperty('notice');
+    }
+  });
+
+  it('checks names across every top-level type, whatever top_level filters', async () => {
+    boot(EXTENSION_XML);
+    expect((await call({ keyword: 'jpeg', top_level: 'application' })).structured.notice).toBe(
+      'No registered media type matched "jpeg" in application. Drop top_level to search every top-level type.',
+    );
+    expect((await call({ keyword: 'mp3', top_level: 'audio' })).structured.notice).toBe(
+      `No registered media type matched "mp3" in audio. Drop top_level to search every top-level type. ${extensionNotice('mp3')}`,
+    );
+    const filteredHit = await call({ keyword: 'jpg', top_level: 'image' });
+    expect(types(filteredHit)).toEqual(['image/vnd.sealedmedia.softseal.jpg']);
+    expect(filteredHit.structured.notice).toBe(extensionNotice('jpg'));
+  });
+
+  it('puts the extension notice before the paging guidance on a cut page', async () => {
+    boot(EXTENSION_XML);
+    const out = await call({ keyword: 'doc', limit: 2 });
+    expect(out.structured).toMatchObject({
+      totalCount: 3,
+      shown: 2,
+      cap: 2,
+      truncated: true,
+      next_offset: 2,
+      notice: `${extensionNotice('doc')} Showing 2 of 3 matching media types; pass offset 2 for the next page, raise limit (max 100), or add words to keyword to narrow.`,
+    });
+    expect(out.text).toContain(String(out.structured.notice));
+  });
+
+  it('puts the extension notice before the past-the-end guidance', async () => {
+    boot(EXTENSION_XML);
+    const out = await call({ keyword: 'doc', offset: 10 });
+    expect(out.structured.notice).toBe(
+      `${extensionNotice('doc')} Offset 10 is past the 3 matching media types; pass an offset below 3, or omit offset to start over.`,
+    );
+  });
+
+  it('keeps the notice on the last page of a paged extension-like keyword', async () => {
+    boot(EXTENSION_XML);
+    const last = await call({ keyword: 'doc', limit: 2, offset: 2 });
+    expect(types(last)).toEqual(DOCS.slice(2));
+    expect(last.structured).toMatchObject({ truncated: false, notice: extensionNotice('doc') });
+  });
+});
+
+describe('iana_lookup_media_type: descriptions', () => {
+  const keywordDescription = lookupMediaType.input.shape.keyword.description ?? '';
+
+  it('pins the keyword description: file extensions are not searched, and the template statement is conditional', () => {
+    expect(keywordDescription).toBe(
+      'Words matched as whole tokens against registered type names and status annotations, e.g. "geo json". File extensions are not searched: look up the expected type with type to read its template\'s file-extension statement, when the template has one. Pass this or type, not both.',
+    );
+  });
+
+  it('never promises a file-extension statement unconditionally', () => {
+    const sentences = [lookupMediaType.description, keywordDescription]
+      .flatMap((text) => text.split(/(?<=\.)\s+(?=[A-Z])/))
+      .filter((sentence) => sentence.includes('file-extension'));
+    expect(sentences).toHaveLength(2);
+    for (const sentence of sentences) expect(sentence).toMatch(/when the template has (it|one)\.$/);
   });
 });
 
@@ -1076,7 +1455,7 @@ describeFailureContract({
   recovery:
     'The IANA media type registry could not be read; retry iana_lookup_media_type in a minute.',
   unreadable: [
-    { label: 'an HTML page served as 200', attempts: 3, response: () => htmlResponse('<html/>') },
+    { label: 'an HTML page served as 200', attempts: 1, response: () => htmlResponse('<html/>') },
     {
       label: 'a body with no registry root',
       attempts: 3,
