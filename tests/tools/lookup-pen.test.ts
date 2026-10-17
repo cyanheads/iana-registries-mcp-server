@@ -542,7 +542,7 @@ describe('iana_lookup_pen: input validation', () => {
     ['a one-character organization', { organization: 'a' }],
     ['an organization over 100 characters', { organization: 'a'.repeat(101) }],
     ['limit 0', { organization: 'example', limit: 0 }],
-    ['limit above 100', { organization: 'example', limit: 101 }],
+    ['limit above 1,000,000', { organization: 'example', limit: 1_000_001 }],
     ['a non-numeric limit', { organization: 'example', limit: 'many' }],
     ['a negative offset', { organization: 'example', offset: -1 }],
   ])('rejects %s as invalid arguments, before any fetch', async (_label, input) => {

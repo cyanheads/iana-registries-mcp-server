@@ -118,6 +118,130 @@ function previousReleaseKey(parts: readonly string[]): string {
   return (hash >>> 0).toString(36);
 }
 
+function decimalRegistry(values: string[]) {
+  const s = setupTools();
+  s.serve({
+    [registryXmlUrl('decimal')]: () =>
+      xmlResponse(
+        registryXml({
+          id: 'decimal',
+          body: values.map((value) => recordXml({ value, description: 'Unassigned' })).join(''),
+        }),
+      ),
+  });
+  return s;
+}
+
+describe('decimal lookup characterization', () => {
+  it.each([
+    ['000443', '443'],
+    ['443', '000443'],
+    ['5', '2-10'],
+    ['2 - 10', '2-10'],
+    [' Example Value ', 'examplevalue'],
+  ])('keeps %s matching %s', async (value, cell) => {
+    decimalRegistry([cell]);
+    const out = await callTool(getRegistryRecords, { registry: 'decimal', value });
+    expect(out.structured).toMatchObject({ totalCount: 1, records: [{ value: cell }] });
+    expect(out.text).toContain(cell);
+  });
+});
+
+describe('exact uint64 decimal ranges', () => {
+  it('bounds decimal comparison work for large registry endpoints', async () => {
+    decimalRegistry([`2-${'9'.repeat(320_000)}`]);
+    await callTool(getRegistryRecords, { registry: 'decimal', value: '5' });
+    const start = process.threadCpuUsage();
+    for (let i = 0; i < 5; i++) {
+      const out = await callTool(getRegistryRecords, { registry: 'decimal', value: '5' });
+      expect(out.structured.totalCount).toBe(1);
+    }
+    const cpu = process.threadCpuUsage(start);
+    expect(cpu.user + cpu.system).toBeLessThan(100_000);
+  });
+  it.each([
+    ['timescales', '5', '2-18446744073709551615'],
+    ['time-tag-map-keys', '15', '14-18446744073709551615'],
+    ['tags', '5000000000', '4294967297-18446744073709551614'],
+  ])('reads the live-derived CBOR %s shape', async (subregistry, value, range) => {
+    const s = setupTools();
+    const xml = registryXml({
+      id: 'cbor-tags',
+      body: [
+        subregistryXml(
+          'timescales',
+          recordXml({ timescale: 'Unassigned', value: '2-18446744073709551615', semantics: '' }),
+        ),
+        subregistryXml(
+          'time-tag-map-keys',
+          recordXml({ value: '14-18446744073709551615', semantics: 'Unassigned' }),
+        ),
+        subregistryXml(
+          'tags',
+          recordXml({
+            value: '4294967297-18446744073709551614',
+            description: 'Unassigned',
+            semantics: '',
+          }),
+        ),
+      ].join(''),
+    });
+    s.serve({ [registryXmlUrl('cbor-tags')]: () => xmlResponse(xml) });
+    const out = await callTool(getRegistryRecords, { registry: 'cbor-tags', subregistry, value });
+    expect(out.structured).toMatchObject({
+      value_field: 'value',
+      totalCount: 1,
+      records: [{ value: range }],
+    });
+    expect(out.text).toContain(range);
+    expect(out.text).toContain('Unassigned');
+  });
+
+  it('compares a selected non-key column exactly with leading zeros and whitespace', async () => {
+    const s = setupTools();
+    s.serve({
+      [registryXmlUrl('decimal')]: () =>
+        xmlResponse(
+          registryXml({
+            id: 'decimal',
+            body: recordXml({ value: 'label', number: '9007199254740993-9007199254740995' }),
+          }),
+        ),
+    });
+    const out = await callTool(getRegistryRecords, {
+      registry: 'decimal',
+      field: 'NuMbEr',
+      value: ' 0009007199254740994 ',
+    });
+    expect(out.structured).toMatchObject({ totalCount: 1, records: [{ value: 'label' }] });
+    expect(out.text).toContain('9007199254740993-9007199254740995');
+  });
+  it.each([
+    ['2-18446744073709551615', '5', true],
+    ['14-18446744073709551615', '15', true],
+    ['4294967297-18446744073709551614', '5000000000', true],
+    ['9007199254740993-9007199254740995', '9007199254740992', false],
+    ['9007199254740993-9007199254740995', '9007199254740993', true],
+    ['9007199254740993-9007199254740995', '9007199254740995', true],
+    ['0009007199254740993-0009007199254740995', '0009007199254740994', true],
+    ['9007199254740993-9007199254740995', '9007199254740996', false],
+    ['2-18446744073709551615', '18446744073709551615', true],
+    ['2-18446744073709551615', '18446744073709551616', false],
+  ])('%s contains %s: %s', async (range, value, found) => {
+    decimalRegistry([range]);
+    const out = await callTool(getRegistryRecords, { registry: 'decimal', value });
+    expect(out.isError).toBe(false);
+    expect(out.structured.totalCount).toBe(found ? 1 : 0);
+    expect(out.structured.records).toEqual(
+      found
+        ? [{ value: range, fields: { value: range, description: 'Unassigned' }, references: [] }]
+        : [],
+    );
+    if (found) expect(out.text).toContain(range);
+    else expect(out.text).toContain('No record');
+  });
+});
+
 describe('iana_get_registry_records: reading one table', () => {
   it('returns the table header, ranges, notes, columns, key column, and records', async () => {
     boot();
@@ -389,7 +513,7 @@ describe('iana_get_registry_records: registry input', () => {
 
   it.each([
     ['limit 0', { limit: 0 }],
-    ['limit above 100', { limit: 101 }],
+    ['limit above 1,000,000', { limit: 1_000_001 }],
     ['a non-numeric limit', { limit: 'many' }],
     ['a one-character contains', { contains: 'a' }],
     ['a contains over 100 characters', { contains: 'a'.repeat(101) }],

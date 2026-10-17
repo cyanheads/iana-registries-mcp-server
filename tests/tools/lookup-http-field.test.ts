@@ -331,7 +331,7 @@ describe('iana_lookup_http_field: input validation', () => {
     ['a keyword over 100 characters', { keyword: 'a'.repeat(101) }],
     ['an unknown status', { name: 'Accept', status: 'bogus' }],
     ['limit 0', { keyword: 'cache', limit: 0 }],
-    ['limit above 100', { keyword: 'cache', limit: 101 }],
+    ['limit above 1,000,000', { keyword: 'cache', limit: 1_000_001 }],
     ['a non-numeric limit', { keyword: 'cache', limit: 'many' }],
     ['a negative offset', { keyword: 'cache', offset: -1 }],
   ])('rejects %s as invalid arguments, before any fetch', async (_label, input) => {

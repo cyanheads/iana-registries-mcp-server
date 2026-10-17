@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.2.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/iana-registries-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.1.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/iana-registries-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/iana-registries-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.2-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.2.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/iana-registries-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.3.1-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/iana-registries-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/iana-registries-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.3-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -29,7 +29,7 @@
 
 ## Overview
 
-Protocol parameters from the IANA registries, and document status from the RFC Editor and the IETF Datatracker. Seven lookups cover the high-traffic registries, one checks RFC and Internet-Draft status, and two search and read any other registry in the IANA protocol index. RFC answers are metadata only; the server never returns RFC text. Runs without an API key, as a stdio process, a local Streamable HTTP server, or the public hosted endpoint above.
+Official IANA protocol registries plus RFC and Internet-Draft status. Look up ports, media types, HTTP status codes and headers, URI schemes, enterprise numbers, and language tags; search any other registry; and check whether an RFC is current, obsoleted, or updated. No API key required.
 
 ### Tools
 
@@ -98,12 +98,15 @@ Protocol parameters from the IANA registries, and document status from the RFC E
 - One of `tag` (underscores read as hyphens) or `description`; `subtag_type` narrows description mode
 - Tag mode returns `well_formed`, `valid`, `canonical_tag` (valid tags only), each part in `subtags[]`, and `issues[]`: `kind` `unknown` and `wrong_position` make a tag invalid, while `deprecated`, `variant_prefix_mismatch`, `suppress_script_redundant`, and `extension_not_validated` are advisory
 - A single-subtag input lists records of other types under the same subtag in `also_registered_as`
+- Canonicalization keeps variant order while deduplicating preferred-value collisions; the registered `ja-Latn-hepburn-heploc` context becomes `ja-Latn-alalc97`, preserving unrelated parts
+- Extension parts add `extension` allocation (`allocated`, `unallocated`, or `unavailable`), descriptions, defining RFCs, and organization authority; `extension_source` records the copy used. Allocation does not change base validity or validate extension content. Optional allocation reads stop within 3 seconds; failure returns base analysis with retry guidance, or a stale allocation copy marked as such
 
 ---
 
 ### `iana_get_rfc_status` <sub>tool</sub>
 
-- Up to 10 `ids` per call: RFC numbers in any common form; BCP, STD, and FYI numbers (`BCP 14`); draft names with or without a revision suffix; RFC and draft file names (`rfc2616.txt`, `draft-ietf-httpbis-semantics-19.txt`); the URL of an RFC or draft on datatracker.ietf.org, tools.ietf.org, or ietf.org, or of an RFC on rfc-editor.org (`https://tools.ietf.org/html/rfc7231`); and a series URL at rfc-editor.org/info/ or datatracker.ietf.org/doc/ (`https://datatracker.ietf.org/doc/bcp14/`). A URL's query and fragment are dropped
+- Up to 1,000 normalized nonblank `ids`, canonically deduplicated before selecting ten per call: RFC numbers in any common form; BCP, STD, and FYI numbers (`BCP 14`); draft names with or without a revision suffix; RFC and draft file names (`rfc2616.txt`, `draft-ietf-httpbis-semantics-19.txt`); the URL of an RFC or draft on datatracker.ietf.org, tools.ietf.org, or ietf.org, or of an RFC on rfc-editor.org (`https://tools.ietf.org/html/rfc7231`); and a series URL at rfc-editor.org/info/ or datatracker.ietf.org/doc/ (`https://datatracker.ietf.org/doc/bcp14/`). A URL's query and fragment are dropped
+- `total_ids` counts distinct ids; `deferred_ids` previews the next ten, while `deferred_count` counts the whole remainder. Resubmit the same original `ids` with `next_ids_offset` as `ids_offset` to continue. `deferred_reason: "batch_limit"` and `deferred_guidance` explain the cut; at/past-end offsets return an empty page without upstream requests
 - `documents[]` gives RFCs their current and as-published status, stream, group, obsoletes and updates relations, the series they belong to (`is_also`), and errata page; gives drafts their state, IESG state, replacements, and `became_rfc`; and gives a series its member RFCs (`kind: "series"`). An unknown id is `found: false` with `guidance`, and a draft revision past the latest stays found with `guidance` naming the latest
 - An id whose lookup fails lands in `failed[]` while the rest still answer, with its `reason` and, when the failure states it, `retryable` (`false` when calling again fails the same way); the call fails only when every id failed. A call starts at most 20 Datatracker requests (an RFC or a series takes 1, plus 1 per call for the RFCs' series; a draft 3, or 4 with a revision suffix); ids past that come back in `failed[]` with reason `request_limit`, to resubmit
 
@@ -111,7 +114,7 @@ Protocol parameters from the IANA registries, and document status from the RFC E
 
 ### `iana_search_registries` <sub>tool</sub>
 
-- `query` words matched against registry titles, categories, and ids, singular and plural alike (`ethertype` finds "Ethertypes"); every word must match, `for` and `the` included; `limit` 1–50, default 15, paged by `offset`
+- `query` words matched against registry titles, categories, and ids, singular and plural alike (`ethertype` finds "Ethertypes"); every word must match, `for` and `the` included; `limit` accepts 1–1,000,000 and clamps to 50, default 15, paged by `offset`
 - A registry or sub-registry id given exactly ranks first, as does a registry id given as words (`protocol numbers` → `protocol-numbers`); the closest titles follow
 - A registry listed under several protocol categories comes back once, its categories joined with `; `
 - Each entry carries the `registry_id` and `subregistry_id` that `iana_get_registry_records` reads, plus registration procedure, defining documents, and page and XML URLs
@@ -121,9 +124,9 @@ Protocol parameters from the IANA registries, and document status from the RFC E
 ### `iana_get_registry_records` <sub>tool</sub>
 
 - A `registry` id or `iana.org/assignments` URL, optional `subregistry`, and filters `value` (exact match on the key column, or on the column `field` names) and `contains` (words in any field, records with an equal field first)
-- `value` digits compare by number with a cell of digits (`0443` finds `443`), and one `0x` token with a one-token `0x` cell (`0x5` finds `0x05`), each also matching its own kind of range row; other `0x` forms compare their digits as written, in any comma, space, or brace spelling
+- `value` digits compare exactly with a cell of digits (`0443` finds `443`) or a decimal range, including 64-bit endpoints. One `0x` token compares by number with a one-token `0x` cell (`0x5` finds `0x05`) or a hex range; other `0x` forms compare their digits as written, in any comma, space, or brace spelling
 - A `value` that misses names the other columns holding it, with their row counts, so `field` recovers a lookup by mnemonic or service name; a hit says when rows without a key cell hold the value too
-- Pages by `cursor` / `next_cursor` (pages after the first carry `offset`) within `limit` (1–100, default 25) and a 48,000-character records budget; a field over 2,000 characters is cut, a record keeps at most 16 fields, and `cut_fields` names what was cut
+- Pages by `cursor` / `next_cursor` (pages after the first carry `offset`) within the effective `limit` (at most 100, default 25) and a 48,000-character records budget; a field over 2,000 characters is cut, a record keeps at most 16 fields, and `cut_fields` names what was cut
 - A registry with several sub-registries and none chosen returns `subregistries[]` instead of records; a table that nests tables lists them in `subregistries[]` on its first page, and a sub-registry read carries the registry's own notes and footnotes in `registry_notes[]`
 - Failures carry `unknown_registry`, `unknown_subregistry`, `unknown_field`, `non_xml_registry`, `invalid_cursor`, or `cursor_mismatch`
 
@@ -142,7 +145,7 @@ IANA-specific:
 Agent-friendly output:
 
 - Misses are results, not errors: a lookup that finds nothing returns `found: false` with a `notice` naming the next step, an unknown RFC or draft returns `found: false` with `guidance`, and an invalid language tag returns `valid: false` with its `issues[]`. A miss means IANA has no registration, not that a value is unused in practice
-- Uniform lookup contract: every lookup takes exactly one mode key and fails `mode_required` otherwise; `limit` is 1–100, default 25 (`iana_search_registries`: 1–50, default 15), and the list modes (`keyword`, `organization`, `description`) page with `offset` and return `next_offset`, `totalCount`, `shown`, and `truncated`
+- Uniform lookup contract: every lookup takes exactly one mode key and fails `mode_required` otherwise; positive safe-integer `limit` values up to 1,000,000 clamp to 100 (default 25), or 50 for `iana_search_registries` (default 15). Clamped calls disclose `requested_limit` and `effective_limit` on both surfaces, including exact and empty modes. List modes (`keyword`, `organization`, `description`) page with `offset` and return `next_offset`, `totalCount`, `shown`, and `truncated`
 - Provenance on every registry response: `source` carries the registry file, `registry_updated`, `fetched_at`, and `stale`
 - Typed failures with recovery hints: every tool declares `upstream_unreadable` (`index_unreadable` for search) and `pacer_shed`, which carries `retryAfter` when this server's own request queue is full
 
@@ -303,7 +306,7 @@ See [`.env.example`](./.env.example) for the full list of framework overrides.
 | `src/mcp-server/tools/definitions` | Tool definitions (`*.tool.ts`), ten tools. |
 | `src/mcp-server/tools/shared` | Schemas, list paging and notices, and markdown helpers the tools share. |
 | `src/services/upstream` | Paced, budgeted HTTP client for iana.org, rfc-editor.org, and datatracker.ietf.org. |
-| `src/services/registry` | Registry cache and parsers: XML registries, the PEN list, the language subtag registry, the protocol index and its ranked search, BCP 47 tag analysis, and personal-data scrubbing. |
+| `src/services/registry` | Registry cache and parsers: XML registries, the PEN list, language subtag and extension registries, the protocol index and its ranked search, BCP 47 tag analysis, and personal-data scrubbing. |
 | `src/services/media-template` | Media type registration template reader. |
 | `src/services/ietf` | RFC Editor and Datatracker document status. |
 | `tests/` | Unit and tool tests, mirroring the `src/` structure. |

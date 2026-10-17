@@ -12,14 +12,18 @@
 import { type EnrichHelpers, z } from '@cyanheads/mcp-ts-core';
 
 /**
- * List counters, all required. Each handler writes
- * `ctx.enrich({ totalCount: 0, shown: 0, cap: input.limit, truncated: false })`
- * as its first statement so every path parses, then calls {@link discloseList}.
+ * List counters, all required. Each handler calls {@link initializeList}
+ * before any branch, then calls {@link discloseList} when the page is known.
  */
 export const listEnrichment = {
   totalCount: z.number().describe('Matches before the limit was applied.'),
   shown: z.number().describe('Results returned.'),
   cap: z.number().describe('The limit applied.'),
+  requested_limit: z.number().optional().describe('The requested limit, present when clamped.'),
+  effective_limit: z
+    .number()
+    .optional()
+    .describe('The response limit after clamping, present when clamped.'),
   truncated: z.boolean().describe('True when more matches exist than were returned.'),
   notice: z.string().optional().describe('Guidance on a miss, a cut list, or another condition.'),
 };
@@ -35,7 +39,28 @@ export const offsetListEnrichment = {
 
 /** `ctx.enrich` of a tool declaring {@link listEnrichment} or {@link offsetListEnrichment}. */
 export type ListEnrich = EnrichHelpers &
-  ((fields: { next_offset?: number; shown?: number }) => void);
+  ((fields: {
+    next_offset?: number;
+    shown?: number;
+    totalCount?: number;
+    cap?: number;
+    truncated?: boolean;
+    requested_limit?: number;
+    effective_limit?: number;
+  }) => void);
+
+/** Initializes truthful list counters and discloses clamping, returning the effective limit. */
+export function initializeList(enrich: ListEnrich, requested: number, max: number): number {
+  const limit = Math.min(requested, max);
+  enrich({
+    totalCount: 0,
+    shown: 0,
+    cap: limit,
+    truncated: false,
+    ...(requested > max ? { requested_limit: requested, effective_limit: limit } : {}),
+  });
+  return limit;
+}
 
 /** The end-of-call disclosure. */
 export interface ListPage {

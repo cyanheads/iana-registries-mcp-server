@@ -1,6 +1,6 @@
 /**
  * @fileoverview Parsed models for the IANA sources: the generic XML registry
- * model, the Private Enterprise Number list, the Language Subtag Registry, and
+ * model, the Private Enterprise Number list, both language registries, and
  * the protocol registry index. Person data never enters any of them; text values
  * are upstream text after the personal-data rules (email-shaped tokens replaced).
  * @module services/registry/types
@@ -195,6 +195,21 @@ export interface LanguageRegistry {
   ranges: LanguageRange[];
   /** Every record, registry order. */
   records: LanguageRecord[];
+}
+
+/** One allocated language extension singleton, excluding personal contact data. */
+export interface LanguageExtension {
+  /** Registry organization name only; contact fields are never parsed. */
+  authority?: string;
+  descriptions: string[];
+  references: Reference[];
+  singleton: string;
+}
+
+/** Parsed Language Tag Extensions Registry; allocation is independent of tag validity. */
+export interface LanguageExtensionsRegistry {
+  bySingleton: ReadonlyMap<string, LanguageExtension>;
+  fileDate: string;
 }
 
 /** A defining document link from the protocol index. */

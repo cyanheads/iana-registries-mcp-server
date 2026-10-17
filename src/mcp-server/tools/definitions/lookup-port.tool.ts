@@ -17,6 +17,7 @@ import { startCallBudget } from '@/services/upstream/call-budget.js';
 import {
   discloseList,
   echo,
+  initializeList,
   offsetIgnored,
   offsetListEnrichment,
   offsetPage,
@@ -232,7 +233,7 @@ export const lookupPort = tool('iana_lookup_port', {
   ],
 
   async handler(input, ctx) {
-    ctx.enrich({ totalCount: 0, shown: 0, cap: input.limit, truncated: false });
+    input = { ...input, limit: initializeList(ctx.enrich, input.limit, 100) };
     const modes = [input.port, input.service, input.keyword].filter((key) => key !== undefined);
     if (modes.length !== 1) {
       throw ctx.fail('mode_required', 'Pass exactly one of port, service, or keyword.');

@@ -627,6 +627,32 @@ describe('analyzeLanguageTag: extensions and private use', () => {
 });
 
 describe('analyzeLanguageTag: canonical form', () => {
+  it.each([
+    ['ja-Latn-hepburn-heploc', 'ja-Latn-alalc97'],
+    ['ja-Latn-hepburn-heploc-alalc97', 'ja-Latn-alalc97'],
+    [
+      'ja-Latn-US-fonipa-hepburn-heploc-alalc97-u-ca-gregory-x-note',
+      'ja-Latn-US-fonipa-alalc97-u-ca-gregory-x-note',
+    ],
+    ['ja-Latn-alalc97-fonipa-hepburn-heploc', 'ja-Latn-alalc97-fonipa'],
+    ['en-Latn-hepburn-heploc', 'en-Latn-hepburn-alalc97'],
+    ['en-alalc97-fonipa-heploc', 'en-alalc97-fonipa'],
+    ['ja-hepburn-heploc', 'ja-hepburn-alalc97'],
+    ['ja-Latn-heploc-hepburn', 'ja-Latn-alalc97-hepburn'],
+  ])('canonicalizes %s to %s without introducing invalid variants', (tag, canonicalTag) => {
+    const analysis = analyze(tag);
+    expect(analysis).toMatchObject({ valid: true, canonicalTag });
+    expect(analyze(canonicalTag)).toMatchObject({ valid: true, canonicalTag });
+  });
+  it('keeps an already-duplicated input invalid', () => {
+    expect(analyze('ja-Latn-hepburn-heploc-alalc97-alalc97')).toMatchObject({ valid: false });
+    expect(analyze('ja-Latn-hepburn-heploc-alalc97-alalc97')).not.toHaveProperty('canonicalTag');
+  });
+  it('keeps unrelated variants, region, extension, and private use in order', () => {
+    expect(analyze('ja-Latn-US-fonipa-alalc97-u-ca-gregory-x-note').canonicalTag).toBe(
+      'ja-Latn-US-fonipa-alalc97-u-ca-gregory-x-note',
+    );
+  });
   it('is set only when the tag is valid', () => {
     for (const tag of ['en-ZZ', 'en-US-Latn', 'zh-cmn-yue', 'en-a-bbb-a-ccc', 'de-1901-1901']) {
       expect(analyze(tag).valid).toBe(false);

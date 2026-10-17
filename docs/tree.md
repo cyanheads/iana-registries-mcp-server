@@ -1,6 +1,6 @@
 # iana-registries-mcp-server - Directory Structure
 
-Generated on: 2026-10-02 14:03:34
+Generated on: 2026-10-17 22:31:15
 
 ```text
 iana-registries-mcp-server/
@@ -131,6 +131,7 @@ iana-registries-mcp-server/
 │   ├── lint-mcp.ts
 │   ├── lint-packaging.ts
 │   ├── list-skills.ts
+│   ├── prune-musl-packages.ts
 │   ├── release-github.ts
 │   └── tree.ts
 ├── src/
@@ -161,6 +162,7 @@ iana-registries-mcp-server/
 │   │   │   └── template-statements.ts
 │   │   ├── registry/
 │   │   │   ├── index-search.ts
+│   │   │   ├── language-extensions-parser.ts
 │   │   │   ├── language-registry-parser.ts
 │   │   │   ├── language-tag.ts
 │   │   │   ├── pen-parser.ts
@@ -197,6 +199,7 @@ iana-registries-mcp-server/
 │   │   │   └── template-statements.test.ts
 │   │   ├── registry/
 │   │   │   ├── index-search.test.ts
+│   │   │   ├── language-extensions-parser.test.ts
 │   │   │   ├── language-registry-parser.test.ts
 │   │   │   ├── language-tag.test.ts
 │   │   │   ├── pen-parser.test.ts
@@ -219,6 +222,7 @@ iana-registries-mcp-server/
 │       ├── get-registry-records.test.ts
 │       ├── get-rfc-status.test.ts
 │       ├── keyword-fold-isolation.test.ts
+│       ├── limit-clamping.test.ts
 │       ├── list-enrichment.test.ts
 │       ├── lookup-http-field.test.ts
 │       ├── lookup-http-status.test.ts

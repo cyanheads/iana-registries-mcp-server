@@ -160,6 +160,21 @@ function prefixMatches(prefix: string, preceding: readonly string[], languageEnd
 
 /** The canonical form of a valid parsed langtag (RFC 5646 §4.5), Suppress-Script kept. */
 function canonicalize(subtags: readonly AnalyzedSubtag[]): string {
+  /** IANA's heploc record explicitly prefers ja-Latn-alalc97, not a generic prefix rewrite. */
+  const heploc = subtags.findIndex(
+    ({ position, subtag, record }) =>
+      position === 'variant' &&
+      subtag === 'heploc' &&
+      record?.preferredValue === 'alalc97' &&
+      record.prefixes.includes('ja-Latn-hepburn'),
+  );
+  const normalizeHeploc =
+    heploc >= 0 &&
+    subtags.some(({ position, subtag }) => position === 'language' && subtag === 'ja') &&
+    subtags.some(({ position, subtag }) => position === 'script' && subtag === 'Latn') &&
+    subtags
+      .slice(0, heploc)
+      .some(({ position, subtag }) => position === 'variant' && subtag === 'hepburn');
   let language = '';
   let script = '';
   let region = '';
@@ -180,7 +195,10 @@ function canonicalize(subtags: readonly AnalyzedSubtag[]): string {
         region = preferred.toUpperCase();
         break;
       case 'variant':
-        variants.push(preferred.toLowerCase());
+        if (!(normalizeHeploc && subtag === 'hepburn')) {
+          const variant = preferred.toLowerCase();
+          if (!variants.includes(variant)) variants.push(variant);
+        }
         break;
       case 'extension':
         extensions.push(subtag);

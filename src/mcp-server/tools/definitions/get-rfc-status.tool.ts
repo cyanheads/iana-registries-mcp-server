@@ -22,9 +22,12 @@ import {
 import { type CallBudget, startCallBudget } from '@/services/upstream/call-budget.js';
 import { DATATRACKER_CALL_REQUESTS } from '@/services/upstream/upstream-client.js';
 import { inline, url } from '../shared/markdown.js';
+import { blankAsUnset, digitsToNumber } from '../shared/schemas.js';
 
 /** Most ids one call resolves. */
 const MAX_IDS = 10;
+/** Most normalized, nonblank input items accepted before canonical deduplication. */
+const MAX_INPUT_IDS = 1_000;
 
 /** The `failed[].error` of an id the call's Datatracker request limit left unresolved. */
 const REQUEST_LIMIT_MESSAGE = `Not resolved within this call's limit of ${DATATRACKER_CALL_REQUESTS} Datatracker requests. Call iana_get_rfc_status again with this id.`;
@@ -33,8 +36,7 @@ const REQUEST_LIMIT_MESSAGE = `Not resolved within this call's limit of ${DATATR
  * `ids` preprocess: one string splits on commas, semicolons, and newlines (a
  * bracketed string stays whole, so the framework's JSON-array repair reads it);
  * items are trimmed, a URL loses its query and fragment, blanks are dropped,
- * and the list is cut to one past the maximum so an oversized list fails with
- * a single bounded issue.
+ * so the schema validates every normalized item before any work is selected.
  */
 function splitIds(value: unknown): unknown {
   const items =
@@ -42,8 +44,7 @@ function splitIds(value: unknown): unknown {
   if (!Array.isArray(items)) return items;
   return items
     .map((item: unknown) => (typeof item === 'string' ? withoutUrlTail(item.trim()) : item))
-    .filter((item: unknown) => item !== '')
-    .slice(0, MAX_IDS + 1);
+    .filter((item: unknown) => item !== '');
 }
 
 /**
@@ -461,7 +462,7 @@ function groupText(group: z.infer<typeof GroupSchema>): string {
 
 export const getRfcStatus = tool('iana_get_rfc_status', {
   title: 'Get RFC, Internet-Draft, and series status',
-  description: `Get the current status of up to 10 RFCs, Internet-Drafts, or BCP/STD/FYI series in one call. Accepts "RFC 9110", "rfc9110", "9110", draft names with or without a revision suffix ("draft-ietf-httpbis-semantics-19"), series numbers ("BCP 14"), RFC and draft file names ("rfc9110.txt"), the URL of an RFC or draft on datatracker.ietf.org, tools.ietf.org, or ietf.org or of an RFC on rfc-editor.org, and a series URL at rfc-editor.org/info/ or datatracker.ietf.org/doc/ ("https://datatracker.ietf.org/doc/bcp14/"). RFCs return current and as-published status, stream, working group, obsoletes/obsoleted-by and updates/updated-by relations, the series they belong to, and the errata page; drafts return their state, IESG state, intended status, expiry, the document that replaced them, and the RFC they became; a series returns its member RFCs. Unknown ids return found: false. A call makes at most ${DATATRACKER_CALL_REQUESTS} Datatracker requests, retries included (an RFC or a series needs one, plus one per call for the RFCs' series; a draft three, or four with a revision suffix): each id is taken in request order if its requests still fit, and the others come back in failed with reason request_limit, to pass in another call.`,
+  description: `Get the current status of up to ten distinct RFCs, Internet-Drafts, or BCP/STD/FYI series per page from up to 1,000 input items. Canonical aliases resolve once. When more remain, deferred_ids previews the next ten, deferred_count counts the whole remainder, and next_ids_offset continues the same original ids. Retry failed ids separately. Accepts "RFC 9110", "rfc9110", "9110", draft names with or without a revision suffix ("draft-ietf-httpbis-semantics-19"), series numbers ("BCP 14"), RFC and draft file names ("rfc9110.txt"), the URL of an RFC or draft on datatracker.ietf.org, tools.ietf.org, or ietf.org or of an RFC on rfc-editor.org, and a series URL at rfc-editor.org/info/ or datatracker.ietf.org/doc/ ("https://datatracker.ietf.org/doc/bcp14/"). RFCs return current and as-published status, stream, working group, obsoletes/obsoleted-by and updates/updated-by relations, the series they belong to, and the errata page; drafts return their state, IESG state, intended status, expiry, the document that replaced them, and the RFC they became; a series returns its member RFCs. Unknown ids return found: false. A call makes at most ${DATATRACKER_CALL_REQUESTS} Datatracker requests, retries included (an RFC or a series needs one, plus one per call for the RFCs' series; a draft three, or four with a revision suffix): each id is taken in request order if its requests still fit, and the others come back in failed with reason request_limit, to pass in another call.`,
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
     ids: z
@@ -477,13 +478,43 @@ export const getRfcStatus = tool('iana_get_rfc_status', {
               ),
           )
           .min(1)
-          .max(MAX_IDS),
+          .max(MAX_INPUT_IDS),
       )
       .describe(
-        'Up to 10 RFCs, Internet-Drafts, or series, e.g. ["RFC 9110", "BCP 14", "draft-ietf-httpbis-semantics-19"]. One comma-, semicolon-, or newline-separated string is also accepted.',
+        'Up to 1,000 normalized nonblank RFC, Internet-Draft, or series items; aliases are canonically deduplicated before selecting ten distinct ids. One comma-, semicolon-, or newline-separated string is also accepted. Resubmit the same ids with next_ids_offset as ids_offset to continue.',
       ),
+    ids_offset: blankAsUnset(z.number().int().min(0).default(0), digitsToNumber).describe(
+      'Number of canonically distinct ids to skip, default 0. Pass next_ids_offset with the same original ids to continue; retry failed ids separately.',
+    ),
   }),
   output: z.object({
+    total_ids: z
+      .number()
+      .describe('Total canonically distinct ids before ids_offset and the ten-id batch limit.'),
+    deferred_ids: z
+      .array(z.string().describe('One canonical id.'))
+      .describe(
+        'Preview of the next at most ten canonical ids, not the entire remainder; no upstream work started for these ids.',
+      ),
+    deferred_count: z
+      .number()
+      .describe(
+        'All distinct ids remaining after this selected batch, including ids beyond the preview.',
+      ),
+    next_ids_offset: z
+      .number()
+      .optional()
+      .describe(
+        'Pass as ids_offset with the same original ids to resolve the next batch; absent at or past the end.',
+      ),
+    deferred_reason: z
+      .literal('batch_limit')
+      .optional()
+      .describe('More distinct ids remain beyond the ten-id batch limit.'),
+    deferred_guidance: z
+      .string()
+      .optional()
+      .describe('How to continue the original id list and retry selected failed ids separately.'),
     documents: z
       .array(
         z
@@ -578,12 +609,33 @@ export const getRfcStatus = tool('iana_get_rfc_status', {
   async handler(input, ctx) {
     const budget = startCallBudget(ctx, { datatracker: DATATRACKER_CALL_REQUESTS });
     const seen = new Set<string>();
-    const requests = input.ids.map(classify).filter((requested) => {
+    const distinct = input.ids.map(classify).filter((requested) => {
       const key = `${requested.kind}:${requested.id.toLowerCase()}`;
       if (seen.has(key)) return false;
       seen.add(key);
       return true;
     });
+    const requests = distinct.slice(input.ids_offset, input.ids_offset + MAX_IDS);
+    const end = input.ids_offset + requests.length;
+    const deferred_count = Math.max(0, distinct.length - end);
+    const continuation = {
+      total_ids: distinct.length,
+      deferred_ids: distinct.slice(end, end + MAX_IDS).map((requested) => requested.id),
+      deferred_count,
+      ...(deferred_count > 0
+        ? {
+            next_ids_offset: end,
+            deferred_reason: 'batch_limit' as const,
+            deferred_guidance: `Resubmit the same original ids with ids_offset ${end} to resolve the next batch. deferred_ids previews only the next ten; retry failed ids separately.`,
+          }
+        : {}),
+    };
+    if (requests.length === 0) {
+      ctx.enrich.notice(
+        `ids_offset ${input.ids_offset} is at or past the ${distinct.length} distinct ids; omit ids_offset to start over.`,
+      );
+      return { documents: [], failed: [], ...continuation };
+    }
 
     const admitted = admit(requests);
     const rfcs = requests.flatMap((requested) =>
@@ -655,13 +707,19 @@ export const getRfcStatus = tool('iana_get_rfc_status', {
         `Series membership was unavailable for ${seriesUnavailable.join(', ')}, so is_also is left out; status and relations still answered.`,
     ].filter(Boolean);
     if (notice.length > 0) ctx.enrich.notice(notice.join(' '));
-    return { documents, failed };
+    return { documents, failed, ...continuation };
   },
 
   format: (result) => {
     const lines = [
       `**Documents:** ${result.documents.length} · **Failed:** ${result.failed.length}`,
+      `**Total ids:** ${result.total_ids} · **Deferred count:** ${result.deferred_count}`,
+      `**Deferred ids (next-ten preview):** ${list(result.deferred_ids)}`,
     ];
+    if (result.next_ids_offset !== undefined)
+      lines.push(`**Next ids offset:** ${result.next_ids_offset}`);
+    if (result.deferred_reason) lines.push(`**Deferred reason:** ${result.deferred_reason}`);
+    if (result.deferred_guidance) lines.push(inline(result.deferred_guidance));
     for (const doc of result.documents) {
       const title = doc.title ? ` · ${inline(doc.title)}` : '';
       lines.push(

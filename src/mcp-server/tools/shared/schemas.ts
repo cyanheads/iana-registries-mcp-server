@@ -48,10 +48,13 @@ export function searchWords() {
     );
 }
 
-/** A `limit` input: integer 1–`max`, blank or a digit string accepted, default `fallback`. */
+/** A requested `limit`, accepted up to one million and clamped by the handler. */
 export function limitInput(max: number, fallback: number) {
-  return blankAsUnset(z.number().int().min(1).max(max).default(fallback), digitsToNumber).describe(
-    `Maximum number of results to return, 1–${max}. Default ${fallback}.`,
+  return blankAsUnset(
+    z.number().int().min(1).max(1_000_000).default(fallback),
+    digitsToNumber,
+  ).describe(
+    `Requested maximum results, 1–1,000,000; values above ${max} are clamped to ${max} and disclosed as requested_limit and effective_limit. Default ${fallback}.`,
   );
 }
 

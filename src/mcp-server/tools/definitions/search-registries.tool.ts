@@ -12,7 +12,13 @@ import { searchIndex } from '@/services/registry/index-search.js';
 import { getRegistryStore } from '@/services/registry/registry-store.js';
 import type { IndexEntry } from '@/services/registry/types.js';
 import { startCallBudget } from '@/services/upstream/call-budget.js';
-import { discloseList, echo, offsetListEnrichment, offsetPage } from '../shared/list-enrichment.js';
+import {
+  discloseList,
+  echo,
+  initializeList,
+  offsetListEnrichment,
+  offsetPage,
+} from '../shared/list-enrichment.js';
 import { inline, sourceLines, url } from '../shared/markdown.js';
 import { limitInput, offsetInput, SourceSchema, searchWords } from '../shared/schemas.js';
 
@@ -104,7 +110,7 @@ export const searchRegistries = tool('iana_search_registries', {
   ],
 
   async handler(input, ctx) {
-    ctx.enrich({ totalCount: 0, shown: 0, cap: input.limit, truncated: false });
+    input = { ...input, limit: initializeList(ctx.enrich, input.limit, 50) };
     const budget = startCallBudget(ctx);
     const { model, source } = await getRegistryStore().getIndex(budget);
 

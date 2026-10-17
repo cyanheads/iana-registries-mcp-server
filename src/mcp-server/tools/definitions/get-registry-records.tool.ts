@@ -35,7 +35,13 @@ import type {
   XmlRegistry,
 } from '@/services/registry/types.js';
 import { type CallBudget, startCallBudget } from '@/services/upstream/call-budget.js';
-import { discloseList, echo, exactFirst, listEnrichment } from '../shared/list-enrichment.js';
+import {
+  discloseList,
+  echo,
+  exactFirst,
+  initializeList,
+  listEnrichment,
+} from '../shared/list-enrichment.js';
 import {
   datesLine,
   inline,
@@ -250,9 +256,13 @@ const squash = (text: string) => text.replace(/\s+/g, '').toLowerCase();
 /** Digits as a number reads them: leading zeros dropped, one `0` kept. */
 const unpadded = (digits: string) => digits.replace(/^0+(?=.)/, '');
 const DIGITS = /^\d+$/;
-const DECIMAL_RANGE = /^(\d{1,15})-(\d{1,15})$/;
+const DECIMAL_RANGE = /^(\d+)-(\d+)$/;
 const HEX_RANGE = /^0x([0-9a-f]+)-0x([0-9a-f]+)$/;
 const HEX_TOKEN = /^0x[0-9a-f]+$/i;
+
+/** Exact ordering of unpadded decimal digits without parsing caller or registry-sized integers. */
+const decimalAtMost = (left: string, right: string) =>
+  left.length < right.length || (left.length === right.length && left <= right);
 
 /**
  * The digits of a hex-form text, as written and lowercased: `0x` tokens only,
@@ -284,7 +294,6 @@ function hexForm(text: string): { digits: string; single: boolean } | undefined 
 function valueMatcher(value: string): (cell: string | undefined) => boolean {
   const wanted = squash(value);
   const digits = DIGITS.test(wanted) ? unpadded(wanted) : undefined;
-  const decimal = digits !== undefined && digits.length <= 15 ? Number(digits) : undefined;
   const hex = hexForm(value);
   const point = hex?.single ? unpadded(hex.digits) : undefined;
   const pointValue = point === undefined ? undefined : BigInt(`0x${point}`);
@@ -294,12 +303,11 @@ function valueMatcher(value: string): (cell: string | undefined) => boolean {
     if (key === wanted) return true;
     if (digits !== undefined) {
       if (DIGITS.test(key)) return unpadded(key) === digits;
-      const range = DECIMAL_RANGE.exec(key);
+      const range = DECIMAL_RANGE.exec(key) as [string, string, string] | null;
       return (
-        decimal !== undefined &&
         range !== null &&
-        Number(range[1]) <= decimal &&
-        decimal <= Number(range[2])
+        decimalAtMost(unpadded(range[1]), digits) &&
+        decimalAtMost(digits, unpadded(range[2]))
       );
     }
     if (!hex) return false;
@@ -492,7 +500,7 @@ export const getRegistryRecords = tool('iana_get_registry_records', {
       'Sub-registry id, case-insensitive, e.g. "tls-parameters-4". Omit to read the only sub-registry, or to list them when there are several.',
     ),
     value: blankAsUnset(z.string().max(100).optional()).describe(
-      'Exact match on the key column named by value_field (value, else number, else the first column), or on field when set; case and whitespace are ignored. A value of digits compares by number with a cell of digits, so "0443" finds "443", and also matches range rows such as "105-199"; it never matches a 0x cell. One 0x token compares by number with a one-token 0x cell, so "0x5" finds "0x05", and also matches range rows such as "0x11-0xff". Any other pair of 0x forms compares the digits as written: "0x1301", "{0x13,0x01}", and "0x13 0x01" all find "0x13,0x01", while "0x13" never finds "0x00,0x13".',
+      'Exact match on the key column named by value_field (value, else number, else the first column), or on field when set; case and whitespace are ignored. A value of digits compares exactly with a cell of digits, so "0443" finds "443", and also matches decimal range rows without precision loss, including 64-bit endpoints; it never matches a 0x cell. One 0x token compares by number with a one-token 0x cell, so "0x5" finds "0x05", and also matches range rows such as "0x11-0xff". Any other pair of 0x forms compares the digits as written: "0x1301", "{0x13,0x01}", and "0x13 0x01" all find "0x13,0x01", while "0x13" never finds "0x00,0x13".',
     ),
     field: blankAsUnset(z.string().max(100).optional()).describe(
       'Column for value to match instead of the key column, case-insensitive, one of the names in columns: e.g. "type" for a DNS RR type mnemonic, or "name" for every row of a service name. Ignored without value.',
@@ -686,7 +694,7 @@ export const getRegistryRecords = tool('iana_get_registry_records', {
   ],
 
   async handler(input, ctx) {
-    ctx.enrich({ totalCount: 0, shown: 0, cap: input.limit, truncated: false });
+    input = { ...input, limit: initializeList(ctx.enrich, input.limit, 100) };
     const target = parseRegistryInput(input.registry);
     let cursor: ReturnType<typeof decodeCursor> | undefined;
     if (input.cursor !== undefined) {

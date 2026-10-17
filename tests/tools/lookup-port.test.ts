@@ -617,7 +617,7 @@ describe('iana_lookup_port: input validation', () => {
     ['a keyword over 100 characters', { keyword: 'a'.repeat(101) }],
     ['an unknown transport', { port: 22, transport: 'icmp' }],
     ['limit 0', { port: 22, limit: 0 }],
-    ['limit above 100', { port: 22, limit: 101 }],
+    ['limit above 1,000,000', { port: 22, limit: 1_000_001 }],
     ['a non-numeric limit', { port: 22, limit: 'many' }],
     ['a negative offset', { keyword: 'time', offset: -1 }],
     ['a fractional offset', { keyword: 'time', offset: 0.5 }],

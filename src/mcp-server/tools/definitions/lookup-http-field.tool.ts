@@ -17,6 +17,7 @@ import {
   discloseList,
   echo,
   exactFirst,
+  initializeList,
   offsetIgnored,
   offsetListEnrichment,
   offsetPage,
@@ -135,7 +136,7 @@ export const lookupHttpField = tool('iana_lookup_http_field', {
   ],
 
   async handler(input, ctx) {
-    ctx.enrich({ totalCount: 0, shown: 0, cap: input.limit, truncated: false });
+    input = { ...input, limit: initializeList(ctx.enrich, input.limit, 100) };
     if ((input.name === undefined) === (input.keyword === undefined)) {
       throw ctx.fail('mode_required', 'Pass exactly one of name or keyword.');
     }

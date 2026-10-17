@@ -52,6 +52,7 @@ const whole = (type: 'grandfathered' | 'redundant', tag: string, description: st
 /** The records of {@link LANGUAGE_TAGS_TEXT}, in file order. */
 export const LANGUAGE_TAG_RECORDS: readonly string[] = [
   language('en', 'English', { Added: '2005-10-16', 'Suppress-Script': 'Latn' }),
+  language('ja', 'Japanese', { Added: '2005-10-16' }),
   language('de', 'German', { Added: '2005-10-16', 'Suppress-Script': 'Latn' }),
   language('sgg', 'Swiss-German Sign Language', { Added: '2009-07-29' }),
   language('gsw', ['Swiss German', 'Alemannic', 'Alsatian'], { Added: '2006-03-08' }),
@@ -102,6 +103,18 @@ export const LANGUAGE_TAG_RECORDS: readonly string[] = [
   variant('rozaj', 'Resian', ['sl']),
   variant('biske', 'The San Giorgio dialect of Resian', ['sl-rozaj']),
   variant('fonipa', 'International Phonetic Alphabet'),
+  variant('hepburn', 'Hepburn romanization', ['ja-Latn']),
+  variant('alalc97', 'ALA-LC Romanization, 1997 edition'),
+  jarRecord({
+    Type: 'variant',
+    Subtag: 'heploc',
+    Description: 'Hepburn romanization, Library of Congress method',
+    Added: '2009-10-01',
+    Deprecated: '2010-02-07',
+    'Preferred-Value': 'alalc97',
+    Prefix: 'ja-Latn-hepburn',
+    Comments: 'Preferred tag is ja-Latn-alalc97',
+  }),
   variant('pinyin', 'Pinyin romanization', ['zh-Latn', 'bo-Latn']),
   whole('grandfathered', 'i-klingon', 'Klingon', {
     Added: '1999-05-26',

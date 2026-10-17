@@ -12,11 +12,13 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   CURATED_REGISTRY_IDS,
+  EXTENSIONS_DEADLINE_MS,
   FRESH_MS,
   GENERIC_MAX_BYTES,
   GENERIC_MAX_ENTRIES,
   HOLD_MS,
   isCuratedRegistryId,
+  LANGUAGE_EXTENSIONS_URL,
   LANGUAGE_REGISTRY_URL,
   LOAD_DEADLINE_MS,
   MISSING_MS,
@@ -26,7 +28,10 @@ import {
   registryXmlUrl,
   STALE_MAX_MS,
 } from '@/services/registry/registry-store.js';
-import { LANGUAGE_REGISTRY_TEXT } from '../../fixtures/language-registry.js';
+import {
+  LANGUAGE_EXTENSIONS_TEXT,
+  LANGUAGE_REGISTRY_TEXT,
+} from '../../fixtures/language-registry.js';
 import { PEN_TEXT } from '../../fixtures/pen.js';
 import { bigIndexHtml, indexHtmlWith } from '../../fixtures/protocol-index.js';
 import {
@@ -932,6 +937,133 @@ describe('PEN', () => {
     const { value } = await settle(() => s.store.getPen(s.budget()));
     expect(value?.model).toBe(first.model);
     expect(value?.source.stale).toBe(true);
+  });
+});
+
+describe('optional language extension registry', () => {
+  it('propagates cancellation even when a fresh allocation copy is cached', async () => {
+    const s = setup();
+    s.state.answer = () => textResponse(LANGUAGE_EXTENSIONS_TEXT);
+    await s.store.getLanguageExtensions(s.budget());
+    const controller = new AbortController();
+    const reason = new Error('caller already cancelled');
+    controller.abort(reason);
+    await expect(s.store.getLanguageExtensions(makeBudget(45_000, controller.signal))).rejects.toBe(
+      reason,
+    );
+    expect(s.fetches()).toBe(1);
+  });
+  it('pins, coalesces, revalidates, and preserves provenance', async () => {
+    const s = setup();
+    s.state.answer = async () => {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      return textResponse(LANGUAGE_EXTENSIONS_TEXT, { 'last-modified': LAST_MODIFIED });
+    };
+    const pending = [
+      s.store.getLanguageExtensions(s.budget()),
+      s.store.getLanguageExtensions(s.budget()),
+    ];
+    await vi.advanceTimersByTimeAsync(100);
+    const [first, second] = await Promise.all(pending);
+    expect(first?.model).toBe(second?.model);
+    expect(first?.source).toEqual({
+      registry_id: 'language-tag-extensions-registry',
+      url: LANGUAGE_EXTENSIONS_URL,
+      registry_updated: '2014-04-02',
+      fetched_at: new Date(T0).toISOString(),
+      stale: false,
+    });
+    expect(s.fetches()).toBe(1);
+    s.advance(FRESH_MS - 1);
+    expect((await s.store.getLanguageExtensions(s.budget()))?.model).toBe(first?.model);
+    expect(s.fetches()).toBe(1);
+    s.advance(1);
+    s.state.answer = () => notModified();
+    const revalidated = await s.store.getLanguageExtensions(s.budget());
+    expect(revalidated?.model).toBe(first?.model);
+    expect(revalidated?.source.fetched_at).toBe(new Date(T0 + FRESH_MS).toISOString());
+    expect(s.header(1, 'if-modified-since')).toBe(LAST_MODIFIED);
+  });
+
+  it.each([
+    ['timeout', hang],
+    ['parse failure', () => textResponse('broken')],
+    ['unavailable', () => statusResponse(503)],
+  ])(
+    'preserves a stale copy after %s without caching unavailable as a fact',
+    async (_label, answer) => {
+      const s = setup();
+      s.state.answer = () => textResponse(LANGUAGE_EXTENSIONS_TEXT);
+      const first = await s.store.getLanguageExtensions(s.budget());
+      s.advance(FRESH_MS);
+      s.state.answer = answer;
+      const started = Date.now();
+      const { value } = await settle(() => s.store.getLanguageExtensions(s.budget()));
+      expect(value?.model).toBe(first?.model);
+      expect(value?.source).toEqual({ ...first?.source, stale: true });
+      expect(Date.now() - started).toBeLessThanOrEqual(EXTENSIONS_DEADLINE_MS);
+      await vi.advanceTimersByTimeAsync(1);
+      s.advance(STALE_MAX_MS);
+      const expired = await settle(() => s.store.getLanguageExtensions(s.budget()));
+      expect(expired.value).toBeUndefined();
+      s.advance(HOLD_MS + 1);
+      s.state.answer = () => textResponse(LANGUAGE_EXTENSIONS_TEXT);
+      expect((await s.store.getLanguageExtensions(s.budget()))?.source.stale).toBe(false);
+    },
+  );
+
+  it('stops a cold hung shared fetch at 3s and releases the host pacing slot', async () => {
+    const s = setup({}, { pacing: { iana: { name: 'iana', maxConcurrent: 1 } } });
+    let aborted = false;
+    s.state.answer = (request) => {
+      if (request.url === LANGUAGE_EXTENSIONS_URL) {
+        request.signal.addEventListener(
+          'abort',
+          () => {
+            aborted = true;
+          },
+          { once: true },
+        );
+        return hang(request);
+      }
+      return xmlResponse(HTTP_STATUS_XML);
+    };
+    const started = Date.now();
+    const pending = s.store.getLanguageExtensions(s.budget());
+    await vi.advanceTimersByTimeAsync(10);
+    const status = loadStatus(s);
+    await vi.advanceTimersByTimeAsync(EXTENSIONS_DEADLINE_MS);
+    expect(await pending).toBeUndefined();
+    expect(aborted).toBe(true);
+    expect((await status).model.recordCount).toBe(4);
+    expect(Date.now() - started).toBe(EXTENSIONS_DEADLINE_MS + 10);
+    expect(s.fetches()).toBe(2);
+    await vi.advanceTimersByTimeAsync(40_000);
+    expect(s.fetches()).toBe(2);
+  });
+
+  it('an impatient or cancelled waiter does not cancel another waiter or the shared cache fill', async () => {
+    const s = setup();
+    s.state.answer = async () => {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      return textResponse(LANGUAGE_EXTENSIONS_TEXT);
+    };
+    const controller = new AbortController();
+    const reason = new Error('caller cancelled');
+    const cancelled = thrown(() =>
+      s.store.getLanguageExtensions(makeBudget(45_000, controller.signal)),
+    );
+    const impatient = s.store.getLanguageExtensions(makeBudget(100));
+    const patient = s.store.getLanguageExtensions(s.budget());
+    await vi.advanceTimersByTimeAsync(100);
+    controller.abort(reason);
+    expect(await cancelled).toBe(reason);
+    expect(await impatient).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(400);
+    const loaded = await patient;
+    expect(loaded?.model.bySingleton.get('u')?.references[0]?.id).toBe('RFC 6067');
+    expect((await s.store.getLanguageExtensions(s.budget()))?.model).toBe(loaded?.model);
+    expect(s.fetches()).toBe(1);
   });
 });
 

@@ -85,3 +85,22 @@ Description: No type is skipped
 
 /** The same registry with CRLF line endings. */
 export const LANGUAGE_REGISTRY_CRLF = LANGUAGE_REGISTRY_TEXT.replace(/\n/g, '\r\n');
+
+/** Live-derived extension records with invented contacts that must be discarded. */
+export const LANGUAGE_EXTENSIONS_TEXT = `File-Date: 2014-04-02
+%%
+Identifier: t
+Description: Specifying Transformed Content
+RFC: [RFC6497]
+Authority: Unicode Consortium
+Contact_Email: private&example.org
+Mailing_List: private@example.org
+%%
+Identifier: u
+Description: Unicode Locale
+RFC: [RFC6067]
+Authority: Unicode Consortium
+Contact_Email: private&example.org
+Mailing_List: private@example.org
+%%
+`;

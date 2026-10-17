@@ -189,6 +189,8 @@ const RFC_8001: Doc = {
   },
 };
 
+const SINGLE_ID_PAGE = { total_ids: 1, deferred_ids: [], deferred_count: 0 };
+
 const DRAFT_DOC: Doc = {
   id: DRAFT,
   kind: 'draft',
@@ -209,13 +211,116 @@ const DRAFT_DOC: Doc = {
   },
 };
 
+describe('iana_get_rfc_status: continuation characterization', () => {
+  it('canonically deduplicates unsupported identifiers without upstream work', async () => {
+    const s = setupTools();
+    const out = await callTool(getRfcStatus, { ids: ['ISO 639', 'iso 639'] });
+    expect(out.structured).toMatchObject({
+      documents: [{ id: 'ISO 639', kind: 'unsupported' }],
+      failed: [],
+    });
+    expect(out.structured.documents).toHaveLength(1);
+    expect(s.fetches()).toBe(0);
+  });
+});
+
+describe('RFC distinct-input continuation', () => {
+  it('accepts 1,000 nonblank aliases, deduplicates before the offset, and rejects the 1,001st', async () => {
+    const s = setupTools();
+    const ids = Array.from({ length: 1_000 }, (_, i) => `ISO ${i % 21}`);
+    const out = await callTool(getRfcStatus, { ids, ids_offset: '10' });
+    expect(out.isError).toBe(false);
+    expect(out.structured).toMatchObject({
+      total_ids: 21,
+      deferred_count: 1,
+      deferred_ids: ['ISO 20'],
+      next_ids_offset: 20,
+    });
+    expect((out.structured.documents as { id: string }[]).map((doc) => doc.id)).toEqual(
+      Array.from({ length: 10 }, (_, i) => `ISO ${i + 10}`),
+    );
+    const invalid = await callTool(getRfcStatus, { ids: [...ids, 'RFC 1'] });
+    expect(invalid.structured.error).toMatchObject({ data: { reason: 'invalid_arguments' } });
+    expect(s.fetches()).toBe(0);
+  });
+
+  it.each([-1, 0.5, Number.MAX_SAFE_INTEGER + 1])(
+    'rejects invalid ids_offset %s without upstream',
+    async (ids_offset) => {
+      const s = setupTools();
+      const out = await callTool(getRfcStatus, { ids: ['RFC 1'], ids_offset });
+      expect(out.structured.error).toMatchObject({ data: { reason: 'invalid_arguments' } });
+      expect(s.fetches()).toBe(0);
+    },
+  );
+
+  it('validates later ids rather than silently dropping an invalid item beyond the batch', async () => {
+    const s = setupTools();
+    const out = await callTool(getRfcStatus, {
+      ids: [...Array(10).fill('ISO 639'), 'x'.repeat(201)],
+    });
+    expect(out.structured.error).toMatchObject({ data: { reason: 'invalid_arguments' } });
+    expect(s.fetches()).toBe(0);
+  });
+  it('deduplicates eleven aliases before choosing the work batch', async () => {
+    const s = setupTools();
+    const out = await callTool(getRfcStatus, { ids: Array(11).fill('ISO 639') });
+    expect(out.isError).toBe(false);
+    expect(out.structured).toMatchObject({
+      total_ids: 1,
+      documents: [{ id: 'ISO 639' }],
+      deferred_ids: [],
+      deferred_count: 0,
+    });
+    expect(out.structured.documents).toHaveLength(1);
+    expect(s.fetches()).toBe(0);
+  });
+
+  it('pages the original distinct sequence with a bounded next-ten preview', async () => {
+    const s = setupTools();
+    const ids = Array.from({ length: 31 }, (_, i) => `ISO ${i}`);
+    const first = await callTool(getRfcStatus, { ids });
+    expect(first.isError).toBe(false);
+    expect(first.structured).toMatchObject({
+      total_ids: 31,
+      deferred_ids: ids.slice(10, 20),
+      deferred_count: 21,
+      next_ids_offset: 10,
+      deferred_reason: 'batch_limit',
+    });
+    expect(first.text).toContain('ISO 19');
+    expect(first.text).toContain('21');
+    expect(first.text).toContain('batch_limit');
+    expect(first.text).toContain('same');
+    const collected = (first.structured.documents as { id: string }[]).map((doc) => doc.id);
+    for (const ids_offset of [10, 20, 30]) {
+      const page = await callTool(getRfcStatus, { ids, ids_offset });
+      collected.push(...(page.structured.documents as { id: string }[]).map((doc) => doc.id));
+    }
+    expect(collected).toEqual(ids);
+    for (const ids_offset of [31, 100, Number.MAX_SAFE_INTEGER]) {
+      const page = await callTool(getRfcStatus, { ids, ids_offset });
+      expect(page.structured).toMatchObject({
+        documents: [],
+        failed: [],
+        total_ids: 31,
+        deferred_ids: [],
+        deferred_count: 0,
+      });
+      expect(page.structured).not.toHaveProperty('next_ids_offset');
+      expect(page.text).toContain('31');
+    }
+    expect(s.fetches()).toBe(0);
+  });
+});
+
 describe('iana_get_rfc_status: an RFC', () => {
   it('returns the RFC Editor status and relations with the Datatracker stream, group, and series', async () => {
     const s = boot();
     serveRfc(s, 8001);
     const out = await call({ ids: ['RFC 8001'] });
     expect(out.isError).toBe(false);
-    expect(out.structured).toEqual({ documents: [RFC_8001], failed: [] });
+    expect(out.structured).toEqual({ documents: [RFC_8001], failed: [], ...SINGLE_ID_PAGE });
     expect(s.fetched().sort()).toEqual(
       [rfcJsonUrl(8001), docUrl('rfc8001'), membershipUrl(8001)].sort(),
     );
@@ -276,6 +381,7 @@ describe('iana_get_rfc_status: an RFC', () => {
     const out = await call({ ids: ['RFC 99999'] });
     expect(out.isError).toBe(false);
     expect(out.structured).toEqual({
+      ...SINGLE_ID_PAGE,
       documents: [
         {
           id: 'RFC 99999',
@@ -510,7 +616,7 @@ describe('iana_get_rfc_status: a BCP, STD, or FYI series', () => {
       const s = boot();
       const out = await call({ ids: [id] });
       expect(out.isError).toBe(false);
-      expect(out.structured).toEqual({ documents: [BCP_14], failed: [] });
+      expect(out.structured).toEqual({ documents: [BCP_14], failed: [], ...SINGLE_ID_PAGE });
       expect(s.fetched()).toEqual([seriesUrl('bcp14')]);
     },
   );
@@ -518,7 +624,7 @@ describe('iana_get_rfc_status: a BCP, STD, or FYI series', () => {
   it('resolves every spelling of one series once', async () => {
     const s = boot();
     const out = await call({ ids: ['BCP 14', 'bcp14', 'BCP-14', 'BCP0014'] });
-    expect(out.structured).toEqual({ documents: [BCP_14], failed: [] });
+    expect(out.structured).toEqual({ documents: [BCP_14], failed: [], ...SINGLE_ID_PAGE });
     expect(s.fetches()).toBe(1);
   });
 
@@ -550,7 +656,7 @@ describe('iana_get_rfc_status: a BCP, STD, or FYI series', () => {
     const url = first?.series?.datatracker_url as string;
     expect(url).toBe('https://datatracker.ietf.org/doc/bcp14/');
     const again = await call({ ids: [url] });
-    expect(again.structured).toEqual({ documents: [BCP_14], failed: [] });
+    expect(again.structured).toEqual({ documents: [BCP_14], failed: [], ...SINGLE_ID_PAGE });
   });
 
   it('collapses series URLs beside the series number into one entry', async () => {
@@ -558,7 +664,7 @@ describe('iana_get_rfc_status: a BCP, STD, or FYI series', () => {
     const out = await call({
       ids: ['BCP 14', 'https://datatracker.ietf.org/doc/bcp14/', 'rfc-editor.org/info/bcp14'],
     });
-    expect(out.structured).toEqual({ documents: [BCP_14], failed: [] });
+    expect(out.structured).toEqual({ documents: [BCP_14], failed: [], ...SINGLE_ID_PAGE });
     expect(s.fetches()).toBe(1);
   });
 
@@ -606,6 +712,7 @@ describe('iana_get_rfc_status: a BCP, STD, or FYI series', () => {
       const out = await call({ ids: [id] });
       expect(out.isError).toBe(false);
       expect(out.structured).toEqual({
+        ...SINGLE_ID_PAGE,
         documents: [
           {
             id,
@@ -699,6 +806,7 @@ describe('iana_get_rfc_status: an Internet-Draft', () => {
     const out = await call({ ids: [DRAFT] });
     expect(out.isError).toBe(false);
     expect(out.structured).toEqual({
+      ...SINGLE_ID_PAGE,
       documents: [
         {
           ...DRAFT_DOC,
@@ -719,7 +827,7 @@ describe('iana_get_rfc_status: an Internet-Draft', () => {
     const s = boot();
     serveDraft(s, DRAFT);
     const out = await call({ ids: [DRAFT] });
-    expect(out.structured).toEqual({ documents: [DRAFT_DOC], failed: [] });
+    expect(out.structured).toEqual({ documents: [DRAFT_DOC], failed: [], ...SINGLE_ID_PAGE });
     expect(JSON.stringify(out.structured)).not.toContain('became_rfc');
   });
 
@@ -814,6 +922,7 @@ describe('iana_get_rfc_status: an Internet-Draft', () => {
     });
     const out = await call({ ids: ['draft-example-wg-missing-05'] });
     expect(out.structured).toEqual({
+      ...SINGLE_ID_PAGE,
       documents: [
         {
           id: 'draft-example-wg-missing-05',
@@ -1185,7 +1294,7 @@ describe('iana_get_rfc_status: ids input', () => {
     expect(docs(out).every((doc) => doc.kind === 'rfc')).toBe(true);
   });
 
-  it('accepts ten ids and rejects eleven', async () => {
+  it('accepts ten ids and defers the eleventh', async () => {
     const s = boot();
     for (let n = 1; n <= 11; n++) serveRfc(s, n, { rfc: notFound, tracking: notFound });
     const ten = await call({ ids: Array.from({ length: 10 }, (_, i) => `RFC ${i + 1}`) });
@@ -1193,19 +1302,52 @@ describe('iana_get_rfc_status: ids input', () => {
     expect(docs(ten)).toHaveLength(10);
 
     const eleven = await call({ ids: Array.from({ length: 11 }, (_, i) => `RFC ${i + 1}`) });
-    expect(eleven.isError).toBe(true);
-    expect(eleven.structured.error).toMatchObject({
-      code: JsonRpcErrorCode.InvalidParams,
-      data: { reason: 'invalid_arguments' },
+    expect(eleven.isError).toBe(false);
+    expect(docs(eleven)).toHaveLength(10);
+    expect(eleven.structured).toMatchObject({
+      total_ids: 11,
+      deferred_ids: ['RFC 11'],
+      deferred_count: 1,
+      next_ids_offset: 10,
+      deferred_reason: 'batch_limit',
     });
+    expect(s.fetched()).not.toContain(rfcJsonUrl(11));
+    expect(eleven.text).toContain('RFC 11');
+  });
+
+  it('resolves 1,000 RFC aliases once before applying the distinct-id offset', async () => {
+    const s = boot();
+    serveRfc(s, 8001);
+    const aliases = [
+      'RFC 8001',
+      '8001',
+      'rfc08001',
+      'rfc8001.txt',
+      'https://tools.ietf.org/html/rfc8001#section-1',
+    ];
+    const ids = Array.from({ length: 1_000 }, (_, i) => aliases[i % aliases.length]);
+    const first = await call({ ids });
+    expect(docIds(first)).toEqual(['RFC 8001']);
+    expect(first.structured).toMatchObject({ total_ids: 1, deferred_ids: [], deferred_count: 0 });
+    expect(s.fetches()).toBe(3);
+    const beyond = await call({ ids, ids_offset: 1 });
+    expect(beyond.structured).toMatchObject({
+      documents: [],
+      failed: [],
+      total_ids: 1,
+      deferred_count: 0,
+    });
+    expect(beyond.structured).not.toHaveProperty('next_ids_offset');
+    expect(s.fetches()).toBe(3);
   });
 
   it('fails a list far over the maximum with one bounded issue', async () => {
-    boot();
-    const out = await call({ ids: Array.from({ length: 80 }, (_, i) => `RFC ${i + 1}`) });
+    const s = boot();
+    const out = await call({ ids: Array.from({ length: 1_001 }, (_, i) => `RFC ${i + 1}`) });
     expect(out.structured.error).toMatchObject({ data: { reason: 'invalid_arguments' } });
     const issues = (out.structured.error as { data: { issues: unknown[] } }).data.issues;
     expect(issues).toHaveLength(1);
+    expect(s.fetches()).toBe(0);
   });
 
   it('counts the ten-id cap after blanks are dropped', async () => {
@@ -1642,7 +1784,7 @@ describe('iana_get_rfc_status: warning logs', () => {
   /** Runs the handler on a mock context, which `callTool` hides, so the test can read its log. */
   async function runHandler(ids: string[], signal?: AbortSignal) {
     const ctx = createMockContext({ errors: getRfcStatus.errors, ...(signal ? { signal } : {}) });
-    const outcome = await settle(async () => getRfcStatus.handler({ ids }, ctx));
+    const outcome = await settle(async () => getRfcStatus.handler({ ids, ids_offset: 0 }, ctx));
     const warnings = (ctx.log as MockContextLogger).calls
       .filter((entry) => entry.level === 'warning')
       .map((entry) => entry.msg);
@@ -1824,6 +1966,48 @@ describe('iana_get_rfc_status: request_limit', () => {
     s.serve({ [docUrl(`${name}-07`)]: notFound });
     serveDraft(s, name);
   };
+
+  it('keeps selected request-budget failures separate from deferred input and retries each path', async () => {
+    const s = boot();
+    for (const name of DRAFTS) serveSuffixed(s, name);
+    serveRfc(s, 8001);
+    const ids = [...SUFFIXED, 'RFC 8001'];
+    const first = await call({ ids });
+    expect(first.isError).toBe(false);
+    expect(datatrackerFetches(s)).toBe(20);
+    expect(failed(first)).toEqual(limitFailures(SUFFIXED.slice(5)));
+    expect(first.structured).toMatchObject({
+      total_ids: 11,
+      deferred_ids: ['RFC 8001'],
+      deferred_count: 1,
+      next_ids_offset: 10,
+      deferred_reason: 'batch_limit',
+    });
+    expect(first.text).toContain('RFC 8001');
+    expect(first.text).toContain('retry failed ids separately');
+    expect(s.fetched()).not.toContain(rfcJsonUrl(8001));
+    const retry = await call({ ids: failed(first).map((item) => item.id) });
+    expect(failed(retry)).toEqual([]);
+    expect(docIds(retry)).toEqual(DRAFTS.slice(5));
+    const next = await call({ ids, ids_offset: 10 });
+    expect(docIds(next)).toEqual(['RFC 8001']);
+    expect(failed(next)).toEqual([]);
+    expect(next.structured).toMatchObject({ total_ids: 11, deferred_ids: [], deferred_count: 0 });
+    expect(next.structured).not.toHaveProperty('next_ids_offset');
+  });
+
+  it('does not resolve a deferred id to mask all selected ids failing', async () => {
+    const s = boot();
+    for (const name of DRAFTS) serveDraft(s, name, { doc: () => statusResponse(503) });
+    const out = await call({ ids: [...DRAFTS, 'RFC 8001'] });
+    expect(out.isError).toBe(true);
+    expect(out.structured.error).toMatchObject({
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      data: { status: 503 },
+    });
+    expect(datatrackerFetches(s)).toBe(18);
+    expect(s.fetched()).not.toContain(rfcJsonUrl(8001));
+  });
 
   it('declares request_limit as retryable RateLimited, its when text naming the 20-request limit', () => {
     expect(DATATRACKER_CALL_REQUESTS).toBe(20);

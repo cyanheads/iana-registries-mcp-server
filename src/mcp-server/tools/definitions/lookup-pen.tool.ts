@@ -16,6 +16,7 @@ import {
   discloseList,
   echo,
   exactFirst,
+  initializeList,
   offsetIgnored,
   offsetListEnrichment,
   offsetPage,
@@ -129,7 +130,7 @@ export const lookupPen = tool('iana_lookup_pen', {
   ],
 
   async handler(input, ctx) {
-    ctx.enrich({ totalCount: 0, shown: 0, cap: input.limit, truncated: false });
+    input = { ...input, limit: initializeList(ctx.enrich, input.limit, 100) };
     if ((input.pen === undefined) === (input.organization === undefined)) {
       throw ctx.fail('mode_required', 'Pass exactly one of pen or organization.');
     }

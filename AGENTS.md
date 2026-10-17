@@ -2,10 +2,10 @@
 
 **Server:** iana-registries-mcp-server
 **Version:** 0.2.0
-**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.10`
+**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.15`
 **Engines:** Bun ≥1.4.0, Node ≥24.0.0
-**MCP SDK:** `@modelcontextprotocol/server` ^2.1.0
-**Zod:** ^4.6.5
+**MCP SDK:** `@modelcontextprotocol/server` ^2.3.1
+**Zod:** ^4.6.7
 
 > **Read the framework docs first:** `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md` contains the full API reference — builders, Context, error codes, exports, patterns. This file covers server-specific conventions only.
 
@@ -54,7 +54,7 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getRegistryStore } from '@/services/registry/registry-store.js';
 import { requireTable } from '@/services/registry/registry-tables.js';
 import { startCallBudget } from '@/services/upstream/call-budget.js';
-import { discloseList, offsetIgnored, offsetListEnrichment } from '../shared/list-enrichment.js';
+import { discloseList, initializeList, offsetIgnored, offsetListEnrichment } from '../shared/list-enrichment.js';
 import { inline, sourceLines } from '../shared/markdown.js';
 import { blankAsUnset, digitsToNumber, limitInput, offsetInput, SourceSchema, searchWords } from '../shared/schemas.js';
 
@@ -92,7 +92,7 @@ export const lookupHttpStatus = tool('iana_lookup_http_status', {
   ],
 
   async handler(input, ctx) {
-    ctx.enrich({ totalCount: 0, shown: 0, cap: input.limit, truncated: false }); // before any branch
+    input = { ...input, limit: initializeList(ctx.enrich, input.limit, 100) }; // before any branch
     if ((input.code === undefined) === (input.keyword === undefined)) {
       throw ctx.fail('mode_required', 'Pass exactly one of code or keyword.');
     }
@@ -244,6 +244,7 @@ src/
       protocol-index-parser.ts          # IANA protocol index page parser
       pen-parser.ts                     # enterprise-numbers.txt parser
       language-registry-parser.ts       # Language Subtag Registry (record-jar) parser
+      language-extensions-parser.ts     # Optional Language Tag Extensions Registry parser
       language-tag.ts                   # BCP 47 tag analysis and canonicalization
       search-text.ts                    # Token-search normalization
       index-search.ts                   # Registry search: singular/plural fold, ranked order (iana_search_registries only)
@@ -398,7 +399,7 @@ security: false                            # optional — true ONLY for a source
 
 ## Publishing
 
-**Every release goes through a release PR, straight-through** — `git-wrapup`'s "Release PR mode", mode `straight-through`. One run: `git-wrapup` lands the commit stack on `release/<version>`, pushes it, and opens the PR (title = the release commit subject, body = the changelog entry plus a gates section); `release-and-publish` then fast-forwards `main` locally with `git merge --ff-only`, creates the tag on `main`'s tip, pushes `main` and the tag, deletes the branch, and publishes. A caller's brief may run a given release as `gated` instead — a `release-pr-review` pass on the open PR before `release-and-publish`. **Never merge through the GitHub UI or `gh pr merge`**: squash and rebase-merge are disabled in the repo settings because both rewrite the stack (rebase-merge also strips the SSH signatures), and a merge commit breaks the linear history.
+**Every release goes through a release PR, straight-through** — `git-wrapup`'s "Release PR mode", mode `straight-through`. One run: `git-wrapup` lands the commit stack on `release/<version>`, pushes it, and opens the PR (title = the release commit subject, body = the release digest: theme line, `## Changes`, `## Gates`, changelog link last); `release-and-publish` then fast-forwards `main` locally with `git merge --ff-only`, creates the tag on `main`'s tip, pushes `main` and the tag, deletes the branch, and publishes. A caller's brief may run a given release as `gated` instead — a `release-pr-review` pass on the open PR before `release-and-publish`. **Never merge through the GitHub UI or `gh pr merge`**: squash and rebase-merge are disabled in the repo settings because both rewrite the stack (rebase-merge also strips the SSH signatures), and a merge commit breaks the linear history.
 
 ---
 
@@ -426,7 +427,7 @@ import { getRegistryStore } from '@/services/registry/registry-store.js';
 - [ ] Upstream text in `format()` passes through `quote()` or `inline()` (`shared/markdown.ts`); `structuredContent` keeps it verbatim
 - [ ] Personal data stays out in the service layer: person elements dropped at parse, free text through `scrubEmails()` (`services/registry/personal-data.ts`)
 - [ ] Handlers call `startCallBudget(ctx)` once and pass the budget to every service call
-- [ ] List tools write `ctx.enrich({ totalCount: 0, shown: 0, cap: input.limit, truncated: false })` first and disclose once through `discloseList()`
+- [ ] List tools call `initializeList()` first, use its effective limit, and disclose once through `discloseList()`; clamped calls expose `requested_limit` and `effective_limit`
 - [ ] If wrapping external API: raw/domain/output schemas reviewed against real upstream sparsity/nullability before finalizing required vs optional fields
 - [ ] If wrapping external API: normalization and `format()` preserve uncertainty; do not fabricate facts from missing upstream data
 - [ ] If wrapping external API: tests include at least one sparse payload case with omitted upstream fields

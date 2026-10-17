@@ -22,6 +22,7 @@ import {
   discloseList,
   echo,
   exactFirst,
+  initializeList,
   offsetIgnored,
   offsetListEnrichment,
   offsetPage,
@@ -174,7 +175,7 @@ export const lookupHttpStatus = tool('iana_lookup_http_status', {
   ],
 
   async handler(input, ctx) {
-    ctx.enrich({ totalCount: 0, shown: 0, cap: input.limit, truncated: false });
+    input = { ...input, limit: initializeList(ctx.enrich, input.limit, 100) };
     if ((input.code === undefined) === (input.keyword === undefined)) {
       throw ctx.fail('mode_required', 'Pass exactly one of code or keyword.');
     }

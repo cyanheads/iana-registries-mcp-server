@@ -17,6 +17,7 @@ import {
   discloseList,
   echo,
   exactFirst,
+  initializeList,
   offsetIgnored,
   offsetListEnrichment,
   offsetPage,
@@ -160,7 +161,7 @@ export const lookupUriScheme = tool('iana_lookup_uri_scheme', {
   ],
 
   async handler(input, ctx) {
-    ctx.enrich({ totalCount: 0, shown: 0, cap: input.limit, truncated: false });
+    input = { ...input, limit: initializeList(ctx.enrich, input.limit, 100) };
     if ((input.scheme === undefined) === (input.keyword === undefined)) {
       throw ctx.fail('mode_required', 'Pass exactly one of scheme or keyword.');
     }

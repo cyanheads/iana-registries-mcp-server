@@ -12,9 +12,14 @@
  */
 
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { lookupLanguageTag } from '@/mcp-server/tools/definitions/lookup-language-tag.tool.js';
-import { LANGUAGE_REGISTRY_URL } from '@/services/registry/registry-store.js';
+import {
+  LANGUAGE_EXTENSIONS_URL,
+  LANGUAGE_REGISTRY_URL,
+} from '@/services/registry/registry-store.js';
+import { LANGUAGE_EXTENSIONS_TEXT } from '../fixtures/language-registry.js';
 import {
   jar,
   LANGUAGE_TAG_EMAIL,
@@ -24,7 +29,7 @@ import {
 import { describeFailureContract } from '../shared/failure-contract.js';
 import { missingFromText } from '../shared/format-parity.js';
 import { callTool, setupTools } from '../shared/tool-harness.js';
-import { htmlResponse, textResponse } from '../shared/upstream-harness.js';
+import { hang, htmlResponse, statusResponse, textResponse } from '../shared/upstream-harness.js';
 
 type Out = Awaited<ReturnType<typeof callTool>>;
 
@@ -55,7 +60,10 @@ afterEach(() => {
 
 function boot(text = LANGUAGE_TAGS_TEXT) {
   const s = setupTools();
-  s.serve({ [LANGUAGE_REGISTRY_URL]: () => textResponse(text) });
+  s.serve({
+    [LANGUAGE_REGISTRY_URL]: () => textResponse(text),
+    [LANGUAGE_EXTENSIONS_URL]: () => textResponse(LANGUAGE_EXTENSIONS_TEXT),
+  });
   return s;
 }
 
@@ -68,6 +76,255 @@ const positions = (out: Out) => subtags(out).map((part) => `${part.position}:${p
 const matched = (out: Out) => matches(out).map((match) => `${match.type}:${match.subtag}`);
 
 describe('iana_lookup_language_tag: tag mode', () => {
+  it('enriches every extension in one tag from one source read', async () => {
+    const s = boot();
+    const out = await call({ tag: 'en-u-ca-gregory-t-en-us-a-foobar' });
+    expect(out.structured).toMatchObject({
+      valid: true,
+      canonical_tag: 'en-a-foobar-t-en-us-u-ca-gregory',
+    });
+    expect(
+      subtags(out)
+        .filter((part) => part.position === 'extension')
+        .map(
+          (part) =>
+            (part as Part & { extension: { singleton: string; allocation: string } }).extension,
+        ),
+    ).toMatchObject([
+      { singleton: 'u', allocation: 'allocated' },
+      { singleton: 't', allocation: 'allocated' },
+      { singleton: 'a', allocation: 'unallocated' },
+    ]);
+    expect(s.fetched()).toEqual([LANGUAGE_REGISTRY_URL, LANGUAGE_EXTENSIONS_URL]);
+    expect(missingFromText(out.structured, out.text)).toEqual([]);
+  });
+
+  it('renders extension text as inert inline text and drops private contact fields', async () => {
+    const s = boot();
+    s.serve({
+      [LANGUAGE_EXTENSIONS_URL]: () =>
+        textResponse(
+          LANGUAGE_EXTENSIONS_TEXT.replace(
+            'Description: Unicode Locale',
+            'Description: Unicode [link](https://example.org) <b>Locale</b>',
+          ).replaceAll('Authority: Unicode Consortium', 'Authority: Unicode <b>Consortium</b>'),
+        ),
+    });
+    const out = await call({ tag: 'en-u-ca-gregory' });
+    expect(out.structured).toMatchObject({
+      subtags: [
+        { subtag: 'en' },
+        {
+          extension: {
+            descriptions: ['Unicode [link](https://example.org) <b>Locale</b>'],
+            authority: 'Unicode <b>Consortium</b>',
+          },
+        },
+      ],
+    });
+    expect(out.text).toContain('Unicode \\[link\\](https://example.org) \\<b\\>Locale\\</b\\>');
+    expect(out.text).toContain('Unicode \\<b\\>Consortium\\</b\\>');
+    expect(JSON.stringify(out.result)).not.toContain('private');
+  });
+  it.each([
+    ['timeout', hang],
+    ['parse failure', () => textResponse('broken')],
+    [
+      'truncated source',
+      () =>
+        textResponse(
+          LANGUAGE_EXTENSIONS_TEXT.slice(0, LANGUAGE_EXTENSIONS_TEXT.indexOf('Identifier: u')),
+        ),
+    ],
+    ['unavailable', () => statusResponse(503)],
+  ])('returns base validity and unavailable guidance on %s', async (_label, answer) => {
+    const s = boot();
+    s.serve({ [LANGUAGE_EXTENSIONS_URL]: answer });
+    const start = Date.now();
+    const out = await call({ tag: 'en-a-foobar' });
+    expect(out.isError).toBe(false);
+    expect(out.structured).toMatchObject({
+      valid: true,
+      well_formed: true,
+      canonical_tag: 'en-a-foobar',
+      subtags: [
+        { subtag: 'en' },
+        {
+          registered: false,
+          extension: {
+            singleton: 'a',
+            allocation: 'unavailable',
+            descriptions: [],
+            references: [],
+          },
+        },
+      ],
+    });
+    expect(out.structured).not.toHaveProperty('extension_source');
+    expect(out.text).toContain('Retry iana_lookup_language_tag shortly');
+    expect(out.text).toContain('base tag analysis is complete');
+    expect(missingFromText(out.structured, out.text)).toEqual([]);
+    expect(Date.now() - start).toBeLessThanOrEqual(3_250);
+    await vi.advanceTimersByTimeAsync(40_000);
+    expect(s.fetched()).toEqual([LANGUAGE_REGISTRY_URL, LANGUAGE_EXTENSIONS_URL]);
+  });
+  it('withholds email-shaped descriptions from both output surfaces', async () => {
+    const s = boot();
+    s.serve({
+      [LANGUAGE_EXTENSIONS_URL]: () =>
+        textResponse(
+          LANGUAGE_EXTENSIONS_TEXT.replace(
+            'Description: Unicode Locale',
+            'Description: Unicode Locale private&example.org',
+          ),
+        ),
+    });
+    const out = await call({ tag: 'en-u-ca-gregory' });
+    expect(out.structured).toMatchObject({
+      valid: true,
+      subtags: [
+        { subtag: 'en' },
+        { extension: { allocation: 'allocated', descriptions: ['[email removed]'] } },
+      ],
+    });
+    expect(JSON.stringify(out.result)).not.toContain('private&example.org');
+    expect(out.text).toContain('**Extension description:** \\[email removed\\]');
+    expect(out.text).toContain('**Allocation:** allocated');
+  });
+
+  it('reports unallocated a without changing base validity and retains stale allocation provenance', async () => {
+    const s = boot();
+    const first = await call({ tag: 'en-a-foobar' });
+    expect(first.structured).toMatchObject({
+      valid: true,
+      canonical_tag: 'en-a-foobar',
+      subtags: [{ subtag: 'en' }, { extension: { singleton: 'a', allocation: 'unallocated' } }],
+    });
+    s.advance(86_400_000);
+    s.serve({ [LANGUAGE_EXTENSIONS_URL]: () => textResponse('broken') });
+    const out = await call({ tag: 'en-u-ca-gregory' });
+    expect(out.structured).toMatchObject({
+      valid: true,
+      extension_source: { stale: true },
+      subtags: [
+        { subtag: 'en' },
+        {
+          extension: { allocation: 'allocated', singleton: 'u', references: [{ id: 'RFC 6067' }] },
+        },
+      ],
+    });
+    expect(out.text).toContain('stale');
+    expect(missingFromText(out.structured, out.text)).toEqual([]);
+  });
+
+  it.each([
+    { tag: 'en-US' },
+    { tag: 'x-private' },
+    { description: 'English' },
+    { description: 'notaword', offset: 999 },
+    { tag: 'en-u' },
+  ])('does not fetch allocation without a parsed extension: %j', async (input) => {
+    const s = boot();
+    await call(input);
+    expect(s.fetched()).toEqual([LANGUAGE_REGISTRY_URL]);
+  });
+
+  it('propagates cancellation during optional metadata without cancelling another caller', async () => {
+    const s = boot();
+    s.serve({
+      [LANGUAGE_EXTENSIONS_URL]: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        return textResponse(LANGUAGE_EXTENSIONS_TEXT);
+      },
+    });
+    const controller = new AbortController();
+    const first = runToolContract(
+      lookupLanguageTag,
+      { tag: 'en-u-ca-gregory' },
+      { context: { signal: controller.signal } },
+    );
+    const second = runToolContract(lookupLanguageTag, { tag: 'en-t-foobar' });
+    await vi.advanceTimersByTimeAsync(100);
+    controller.abort();
+    await vi.advanceTimersByTimeAsync(400);
+    const [cancelled, completed] = await Promise.all([first, second]);
+    expect(cancelled.isError).toBe(true);
+    expect(cancelled.structuredContent).toMatchObject({
+      error: { code: JsonRpcErrorCode.RequestCancelled },
+    });
+    expect(JSON.stringify(cancelled.content)).toMatch(/cancel|abort/i);
+    expect(completed.structuredContent).toMatchObject({
+      valid: true,
+      subtags: [{ subtag: 'en' }, { extension: { allocation: 'allocated', singleton: 't' } }],
+    });
+    expect(s.fetched()).toEqual([LANGUAGE_REGISTRY_URL, LANGUAGE_EXTENSIONS_URL]);
+  });
+  it.each([
+    ['u', 'Unicode Locale', 'RFC 6067'],
+    ['t', 'Specifying Transformed Content', 'RFC 6497'],
+  ])('reports allocated %s and its defining document', async (singleton, description, rfc) => {
+    const s = boot();
+    s.serve({
+      'https://www.iana.org/assignments/language-tag-extensions-registry/language-tag-extensions-registry':
+        () => textResponse(LANGUAGE_EXTENSIONS_TEXT),
+    });
+    const out = await call({ tag: `en-${singleton}-foobar` });
+    expect(out.structured).toMatchObject({
+      valid: true,
+      subtags: [
+        { subtag: 'en' },
+        {
+          extension: {
+            singleton,
+            allocation: 'allocated',
+            descriptions: [description],
+            references: [{ type: 'rfc', id: rfc }],
+            authority: 'Unicode Consortium',
+          },
+        },
+      ],
+      extension_source: {
+        registry_id: 'language-tag-extensions-registry',
+        registry_updated: '2014-04-02',
+        stale: false,
+      },
+    });
+    expect(missingFromText(out.structured, out.text)).toEqual([]);
+    expect(JSON.stringify(out.result)).not.toContain('private');
+  });
+  it('keeps extension registration separate from successful base analysis', async () => {
+    boot();
+    const out = await call({ tag: 'en-u-ca-gregory' });
+    expect(out.structured).toMatchObject({
+      well_formed: true,
+      valid: true,
+      canonical_tag: 'en-u-ca-gregory',
+      subtags: [
+        { subtag: 'en', position: 'language', registered: true },
+        { subtag: 'u-ca-gregory', position: 'extension', registered: false },
+      ],
+      issues: [
+        {
+          subtag: 'u-ca-gregory',
+          kind: 'extension_not_validated',
+          message:
+            "Extension u-ca-gregory is checked for syntax only; its content is defined by the extension's own specification.",
+        },
+      ],
+    });
+  });
+  it.each(['ja-Latn-hepburn-heploc', 'ja-Latn-hepburn-heploc-alalc97'])(
+    'returns the preferred heploc tag on both surfaces: %s',
+    async (tag) => {
+      boot();
+      const out = await call({ tag });
+      expect(out.structured).toMatchObject({ valid: true, canonical_tag: 'ja-Latn-alalc97' });
+      expect(out.text).toContain('ja-Latn-alalc97');
+      const again = await call({ tag: out.structured.canonical_tag });
+      expect(again.structured).toMatchObject({ valid: true, canonical_tag: 'ja-Latn-alalc97' });
+      expect(missingFromText(out.structured, out.text)).toEqual([]);
+    },
+  );
   it('returns a redundant tag as its whole-tag record first, then the tag own subtags', async () => {
     boot();
     const out = await call({ tag: 'zh-Hant-TW' });
@@ -184,7 +441,20 @@ describe('iana_lookup_language_tag: tag mode', () => {
     boot();
     const out = await call({ tag: 'en-US-a-bbb-x-priv' });
     expect(subtags(out).slice(2)).toEqual([
-      { subtag: 'a-bbb', position: 'extension', registered: false, descriptions: [] },
+      {
+        subtag: 'a-bbb',
+        position: 'extension',
+        registered: false,
+        descriptions: [],
+        extension: {
+          singleton: 'a',
+          allocation: 'unallocated',
+          descriptions: [],
+          references: [],
+          guidance:
+            'The singleton is unallocated in this registry copy; base tag validity checks syntax and registered base subtags only.',
+        },
+      },
       { subtag: 'x-priv', position: 'privateuse', registered: false, descriptions: [] },
     ]);
     expect(issues(out).map((issue) => issue.kind)).toEqual(['extension_not_validated']);
@@ -656,7 +926,7 @@ describe('iana_lookup_language_tag: input validation', () => {
     ['a description over 100 characters', { description: 'a'.repeat(101) }],
     ['an unknown subtag_type', { description: 'german', subtag_type: 'dialect' }],
     ['limit 0', { description: 'german', limit: 0 }],
-    ['limit above 100', { description: 'german', limit: 101 }],
+    ['limit above 1,000,000', { description: 'german', limit: 1_000_001 }],
     ['a non-numeric limit', { description: 'german', limit: 'many' }],
     ['a negative offset', { description: 'german', offset: -1 }],
   ])('rejects %s as invalid arguments, before any fetch', async (_label, input) => {

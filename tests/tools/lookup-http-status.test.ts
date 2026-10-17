@@ -328,7 +328,7 @@ describe('iana_lookup_http_status: input validation', () => {
     ['a one-character keyword', { keyword: 'a' }],
     ['a keyword over 100 characters', { keyword: 'a'.repeat(101) }],
     ['limit 0', { code: 200, limit: 0 }],
-    ['limit above 100', { code: 200, limit: 101 }],
+    ['limit above 1,000,000', { code: 200, limit: 1_000_001 }],
     ['a fractional limit', { code: 200, limit: 1.5 }],
     ['a non-numeric limit', { code: 200, limit: 'many' }],
     ['a negative offset', { keyword: 'gateway', offset: -1 }],

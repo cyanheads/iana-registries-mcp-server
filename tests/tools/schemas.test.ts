@@ -5,7 +5,19 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { offsetInput, searchWords } from '@/mcp-server/tools/shared/schemas.js';
+import { limitInput, offsetInput, searchWords } from '@/mcp-server/tools/shared/schemas.js';
+
+describe('limitInput', () => {
+  it.each([101, 1000000, '1000000'])('accepts oversized result requests %j', (value) => {
+    expect(limitInput(100, 25).parse(value)).toBe(Number(value));
+  });
+  it.each([0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, 1000001, '1000001'])(
+    'rejects invalid or above-ceiling %j',
+    (value) => {
+      expect(limitInput(100, 25).safeParse(value).success).toBe(false);
+    },
+  );
+});
 
 describe('offsetInput', () => {
   it.each([

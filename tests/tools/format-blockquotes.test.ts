@@ -165,6 +165,9 @@ const OUTPUTS: Record<string, unknown> = {
     source: SOURCE,
   },
   iana_get_rfc_status: {
+    total_ids: 3,
+    deferred_ids: [],
+    deferred_count: 0,
     documents: [
       {
         id: 'RFC 9999',

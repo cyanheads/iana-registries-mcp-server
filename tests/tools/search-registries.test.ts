@@ -512,7 +512,7 @@ describe('iana_search_registries: input validation', () => {
     ['a one-character query', { query: 'a' }],
     ['a query over 100 characters', { query: 'a'.repeat(101) }],
     ['limit 0', { query: 'cipher', limit: 0 }],
-    ['limit above 50', { query: 'cipher', limit: 51 }],
+    ['limit above 1,000,000', { query: 'cipher', limit: 1_000_001 }],
     ['a fractional limit', { query: 'cipher', limit: 1.5 }],
     ['a non-numeric limit', { query: 'cipher', limit: 'many' }],
     ['a negative offset', { query: 'cipher', offset: -1 }],

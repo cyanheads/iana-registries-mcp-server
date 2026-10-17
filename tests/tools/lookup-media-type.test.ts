@@ -1250,7 +1250,7 @@ describe('iana_lookup_media_type: input validation', () => {
     ['a one-character keyword', { keyword: 'a' }],
     ['a keyword over 100 characters', { keyword: 'a'.repeat(101) }],
     ['limit 0', { keyword: 'json', limit: 0 }],
-    ['limit above 100', { keyword: 'json', limit: 101 }],
+    ['limit above 1,000,000', { keyword: 'json', limit: 1_000_001 }],
     ['a non-numeric limit', { keyword: 'json', limit: 'many' }],
     ['a negative offset', { keyword: 'json', offset: -5 }],
   ])('rejects %s as invalid arguments, before any fetch', async (_label, input) => {

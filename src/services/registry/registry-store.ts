@@ -1,11 +1,12 @@
 /**
  * @fileoverview In-memory parsed cache over the IANA files: generic XML
- * registries, the PEN list, the Language Subtag Registry, and the protocol
+ * registries, the PEN list, both language registries, and the protocol
  * index. Each source loads on first use, stays fresh for 24 h, then revalidates
  * with `If-Modified-Since` (304 re-stamps it). A failed refresh starts a 2-minute
  * hold during which the source is not re-fetched; callers get a copy up to 7 days
  * old marked `stale`, else the failure. Concurrent loads of one source share one
- * promise run under a server-scoped signal and its own 40 s deadline, so no
+ * promise run under a server-scoped signal and its own deadline (40 s, or 3 s
+ * for optional extension allocation), so no
  * caller's cancellation fails the others; each caller waits within its own
  * budget. Curated sources are pinned; other XML registries sit in a
  * byte-weighted LRU. `source.url` names the file a model was parsed from, the
@@ -23,10 +24,18 @@ import {
   type UpstreamResponse,
   upstreamUnreadable,
 } from '../upstream/upstream-client.js';
+import { parseLanguageExtensions } from './language-extensions-parser.js';
 import { parseLanguageRegistry } from './language-registry-parser.js';
 import { parsePen } from './pen-parser.js';
 import { indexFloorError, parseProtocolIndex } from './protocol-index-parser.js';
-import type { LanguageRegistry, Loaded, PenRegistry, ProtocolIndex, XmlRegistry } from './types.js';
+import type {
+  LanguageExtensionsRegistry,
+  LanguageRegistry,
+  Loaded,
+  PenRegistry,
+  ProtocolIndex,
+  XmlRegistry,
+} from './types.js';
 import { parseXmlRegistry } from './xml-registry-parser.js';
 
 /** XML registries the curated tools read; pinned, never evicted. */
@@ -44,6 +53,9 @@ export type CuratedRegistryId = (typeof CURATED_REGISTRY_IDS)[number];
 const IANA = 'https://www.iana.org';
 export const PEN_URL = `${IANA}/assignments/enterprise-numbers.txt`;
 export const LANGUAGE_REGISTRY_URL = `${IANA}/assignments/language-subtag-registry/language-subtag-registry`;
+export const LANGUAGE_EXTENSIONS_URL = `${IANA}/assignments/language-tag-extensions-registry/language-tag-extensions-registry`;
+/** Optional extension allocation work never occupies a caller or pacing slot beyond this bound. */
+export const EXTENSIONS_DEADLINE_MS = 3_000;
 export const PROTOCOL_INDEX_URL = `${IANA}/protocols`;
 
 /** `https://www.iana.org/assignments/<id>/<id>.xml`, the id path-encoded. */
@@ -83,11 +95,14 @@ const GENERIC_XML_MAX_BYTES = 16 * MiB;
 interface SourceSpec<T> {
   accept: readonly number[];
   expect: ExpectedContent;
+  loadDeadlineMs?: number;
   /** Decoded-body ceiling. */
   maxBytes: number;
   parse: (body: string, budget: CallBudget) => T;
   /** The registry's own last-updated date. */
   registryUpdated: (model: T) => string | undefined;
+  /** Optional metadata is a single attempt, including redirect hops. */
+  requests?: number;
   /** `data.reason` for an unreadable answer. Default `upstream_unreadable`. */
   unreadableReason?: string;
 }
@@ -183,6 +198,7 @@ export class RegistryStore implements Disposable {
   readonly #missing = new Map<string, number>();
   readonly #pen: Slot<PenRegistry>;
   readonly #language: Slot<LanguageRegistry>;
+  readonly #extensions: Slot<LanguageExtensionsRegistry>;
   readonly #index: Slot<ProtocolIndex>;
 
   constructor(options: RegistryStoreOptions) {
@@ -212,6 +228,16 @@ export class RegistryStore implements Disposable {
       expect: 'text',
       maxBytes: 4 * MiB,
       parse: (body) => parseLanguageRegistry(body, LANGUAGE_REGISTRY_URL),
+      registryUpdated: (model) => model.fileDate,
+    });
+
+    this.#extensions = slot('language-tag-extensions-registry', LANGUAGE_EXTENSIONS_URL, {
+      accept: [200, 304],
+      expect: 'text',
+      maxBytes: MiB,
+      loadDeadlineMs: EXTENSIONS_DEADLINE_MS,
+      requests: 1,
+      parse: (body) => parseLanguageExtensions(body, LANGUAGE_EXTENSIONS_URL),
       registryUpdated: (model) => model.fileDate,
     });
 
@@ -277,6 +303,27 @@ export class RegistryStore implements Disposable {
   /** The Language Subtag Registry (pinned). */
   async getLanguageRegistry(budget: CallBudget): Promise<Loaded<LanguageRegistry>> {
     return required(await this.#read(this.#language, budget), this.#language.key);
+  }
+
+  /** Optional allocation registry: independent bounded wait, stale copy or no metadata on failure. */
+  async getLanguageExtensions(
+    budget: CallBudget,
+  ): Promise<Loaded<LanguageExtensionsRegistry> | undefined> {
+    budget.signal.throwIfAborted();
+    const wait = createCallBudget({
+      signal: budget.signal,
+      context: budget.context,
+      totalMs: Math.min(EXTENSIONS_DEADLINE_MS, budget.remainingMs()),
+    });
+    try {
+      return await this.#read(this.#extensions, wait);
+    } catch (error) {
+      if (budget.signal.aborted) throw error;
+      const entry = this.#extensions.entry;
+      return entry && this.#now() - entry.fetchedAt <= this.#staleMaxMs
+        ? this.#loaded(this.#extensions, entry, true)
+        : undefined;
+    }
   }
 
   /**
@@ -347,7 +394,8 @@ export class RegistryStore implements Disposable {
   async #load<T>(source: Slot<T>): Promise<LoadOutcome<T>> {
     const budget = createCallBudget({
       signal: this.#scope.signal,
-      totalMs: LOAD_DEADLINE_MS,
+      totalMs: source.spec.loadDeadlineMs ?? LOAD_DEADLINE_MS,
+      ...(source.spec.requests ? { requests: { iana: source.spec.requests } } : {}),
       context: requestContextService.createRequestContext({
         operation: 'RegistryStore.load',
         additionalContext: { source: source.key },

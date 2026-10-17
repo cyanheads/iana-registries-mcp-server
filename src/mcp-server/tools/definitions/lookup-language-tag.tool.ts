@@ -17,18 +17,41 @@ import {
   discloseList,
   echo,
   exactFirst,
+  initializeList,
   offsetIgnored,
   offsetListEnrichment,
   offsetPage,
 } from '../shared/list-enrichment.js';
-import { inline, joinLines, quote, sourceLines } from '../shared/markdown.js';
+import { inline, joinLines, quote, referenceLines, sourceLines } from '../shared/markdown.js';
 import {
   blankAsUnset,
   limitInput,
   offsetInput,
+  ReferenceSchema,
   SourceSchema,
   searchWords,
 } from '../shared/schemas.js';
+
+const ExtensionSchema = z
+  .object({
+    singleton: z.string().describe('The extension singleton, e.g. u or t.'),
+    allocation: z
+      .enum(['allocated', 'unallocated', 'unavailable'])
+      .describe('Singleton allocation only; never validation of extension content.'),
+    descriptions: z
+      .array(z.string())
+      .describe('Allocated extension descriptions, empty otherwise.'),
+    references: z
+      .array(ReferenceSchema)
+      .describe('Defining RFCs, empty when allocation is unknown or unallocated.'),
+    authority: z.string().optional().describe('The registry authority organization; no contacts.'),
+    guidance: z
+      .string()
+      .describe(
+        'How to interpret allocation and validate extension content, or retry unavailable metadata.',
+      ),
+  })
+  .describe('Optional extension allocation metadata, independent of base tag validity.');
 
 /** Hyphen-separated subtags of 1–8 letters or digits (underscores are converted first). */
 const TAG_PATTERN = /^[A-Za-z0-9]{1,8}(?:-[A-Za-z0-9]{1,8})*$/;
@@ -135,7 +158,7 @@ function recordLines(record: RecordView): string[] {
 export const lookupLanguageTag = tool('iana_lookup_language_tag', {
   title: 'Validate a BCP 47 language tag',
   description:
-    'Parse and validate a BCP 47 language tag against the IANA Language Subtag Registry, or search subtags by description. Pass exactly one of `tag` (e.g. "zh-Hant-TW", "sr-Latn", "en_US") or `description` (e.g. "Swiss German"). A tag is split into language, extlang, script, region, variant, extension, and private-use parts; each part is checked, deprecated subtags report their preferred value, and a canonical tag is returned when the tag is valid. A single subtag registered under several types (e.g. "TW") lists the other types.',
+    'Parse and validate a BCP 47 language tag against the IANA Language Subtag Registry, or search subtags by description. Pass exactly one of `tag` (e.g. "zh-Hant-TW", "sr-Latn", "en_US") or `description` (e.g. "Swiss German"). A tag is split into language, extlang, script, region, variant, extension, and private-use parts; deprecated subtags report their preferred value, and a canonical tag is returned when valid. Extension singleton allocation and defining RFCs are optional metadata; allocation never validates extension content or changes base validity. A single subtag registered under several types (e.g. "TW") lists the other types.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
     tag: blankAsUnset(z.string().max(100).regex(TAG_PATTERN).optional(), (trimmed) =>
@@ -150,7 +173,7 @@ export const lookupLanguageTag = tool('iana_lookup_language_tag', {
       trimmed.toLowerCase(),
     ).describe('Description mode only: return only records of this Type.'),
     limit: limitInput(100, 25).describe(
-      'Maximum number of description matches to return, 1–100. Default 25. Tag mode always returns every part of the tag.',
+      'Requested description matches, 1–1,000,000, clamped to 100 with requested_limit and effective_limit disclosed. Default 25. Tag mode always returns every part of the tag.',
     ),
     offset: offsetInput('description'),
   }),
@@ -174,7 +197,7 @@ export const lookupLanguageTag = tool('iana_lookup_language_tag', {
       .string()
       .optional()
       .describe(
-        'Tag mode, valid tags only: canonical form (preferred values applied, extlang reduced, case normalized).',
+        'Tag mode, valid tags only: canonical form (preferred values applied, variant collisions deduplicated, registered heploc context normalized, extlang reduced, case normalized).',
       ),
     subtags: z
       .array(
@@ -204,6 +227,7 @@ export const lookupLanguageTag = tool('iana_lookup_language_tag', {
                 'True when a record covers the subtag at this position (private-use ranges count); always false for extension and private-use parts.',
               ),
             ...recordFields,
+            extension: ExtensionSchema.optional(),
           })
           .describe('One part of the tag.'),
       )
@@ -247,6 +271,9 @@ export const lookupLanguageTag = tool('iana_lookup_language_tag', {
         'Description mode: matching records, exact description matches first, then registry order.',
       ),
     source: SourceSchema,
+    extension_source: SourceSchema.optional().describe(
+      'Provenance of the allocation registry copy; absent when unavailable or no extensions were read.',
+    ),
   }),
   enrichment: offsetListEnrichment,
   errors: [
@@ -277,7 +304,7 @@ export const lookupLanguageTag = tool('iana_lookup_language_tag', {
   ],
 
   async handler(input, ctx) {
-    ctx.enrich({ totalCount: 0, shown: 0, cap: input.limit, truncated: false });
+    input = { ...input, limit: initializeList(ctx.enrich, input.limit, 100) };
     if ((input.tag === undefined) === (input.description === undefined)) {
       throw ctx.fail('mode_required', 'Pass exactly one of tag or description.');
     }
@@ -286,12 +313,39 @@ export const lookupLanguageTag = tool('iana_lookup_language_tag', {
 
     if (input.tag !== undefined) {
       const analysis = analyzeLanguageTag(input.tag, loaded.model);
-      const subtags = analysis.subtags.map(({ subtag, position, record }) => ({
-        subtag,
-        position,
-        registered: record !== undefined,
-        ...toRecordFields(record),
-      }));
+      const extensions = analysis.subtags.some((part) => part.position === 'extension')
+        ? await getRegistryStore().getLanguageExtensions(budget)
+        : undefined;
+      const subtags = analysis.subtags.map(({ subtag, position, record }) => {
+        const singleton = subtag.charAt(0);
+        const allocation = extensions?.model.bySingleton.get(singleton);
+        return {
+          subtag,
+          position,
+          registered: record !== undefined,
+          ...toRecordFields(record),
+          ...(position === 'extension'
+            ? {
+                extension: {
+                  singleton,
+                  allocation: !extensions
+                    ? ('unavailable' as const)
+                    : allocation
+                      ? ('allocated' as const)
+                      : ('unallocated' as const),
+                  descriptions: allocation?.descriptions ?? [],
+                  references: allocation?.references ?? [],
+                  ...(allocation?.authority ? { authority: allocation.authority } : {}),
+                  guidance: !extensions
+                    ? 'Extension allocation could not be read; base tag analysis is complete. Retry iana_lookup_language_tag shortly for allocation metadata.'
+                    : allocation
+                      ? 'The singleton is allocated; consult its defining RFC for extension content validation. Allocation does not validate this extension content.'
+                      : 'The singleton is unallocated in this registry copy; base tag validity checks syntax and registered base subtags only.',
+                },
+              }
+            : {}),
+        };
+      });
       discloseList(ctx.enrich, {
         total: subtags.length,
         shown: subtags.length,
@@ -315,6 +369,7 @@ export const lookupLanguageTag = tool('iana_lookup_language_tag', {
           ? { also_registered_as: analysis.alsoRegisteredAs.map(toTypedRecord) }
           : {}),
         source: loaded.source,
+        ...(extensions ? { extension_source: extensions.source } : {}),
       };
     }
 
@@ -375,6 +430,18 @@ export const lookupLanguageTag = tool('iana_lookup_language_tag', {
         `**Registered:** ${subtag.registered}`,
         ...recordLines(subtag),
       );
+      if (subtag.extension) {
+        const extension = subtag.extension;
+        lines.push(
+          `**Extension singleton:** ${inline(extension.singleton)} · **Allocation:** ${extension.allocation}`,
+          ...extension.descriptions.map(
+            (description) => `**Extension description:** ${inline(description)}`,
+          ),
+          ...referenceLines(extension.references),
+          ...(extension.authority ? [`**Authority:** ${inline(extension.authority)}`] : []),
+          `**Guidance:** ${inline(extension.guidance)}`,
+        );
+      }
     }
     if (result.also_registered_as?.length) {
       lines.push('', '### Also registered as');
@@ -386,6 +453,8 @@ export const lookupLanguageTag = tool('iana_lookup_language_tag', {
       lines.push('', `### ${inline(record.subtag)} · ${record.type}`, ...recordLines(record));
     }
     lines.push('', ...sourceLines(result.source));
+    if (result.extension_source)
+      lines.push('', '### Extension allocation source', ...sourceLines(result.extension_source));
     return [{ type: 'text', text: joinLines(lines) }];
   },
 });
