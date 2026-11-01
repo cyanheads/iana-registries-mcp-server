@@ -73,6 +73,21 @@ export function quote(text: string): string {
     .join('\n');
 }
 
+/** Whitespace-preserving code block, with a delimiter longer than every embedded backtick run. */
+export function literal(text: string): string {
+  const clean = text.replace(CONTROL_OR_BIDI, (char) =>
+    char === '\t' || char === '\n' || char === '\r' ? char : '',
+  );
+  let longest = 0;
+  let run = 0;
+  for (const char of clean) {
+    run = char === '`' ? run + 1 : 0;
+    if (run > longest) longest = run;
+  }
+  const fence = '`'.repeat(Math.max(3, longest + 1));
+  return `${fence}\n${clean}\n${fence}`;
+}
+
 /**
  * Joins `format()` lines into one text, inserting a blank line wherever a quoted
  * (`>`) line is followed by a non-blank line that is not quoted. Without it, a
@@ -81,9 +96,17 @@ export function quote(text: string): string {
  */
 export function joinLines(lines: readonly string[]): string {
   const joined: string[] = [];
+  let fenceLength = 0;
   for (const line of lines.join('\n').split('\n')) {
-    if (joined.at(-1)?.startsWith('>') && line !== '' && !line.startsWith('>')) joined.push('');
+    const fence = /^`+/.exec(line);
+    const run = fence === null ? 0 : fence[0].length;
+    if (fenceLength === 0 && joined.at(-1)?.startsWith('>') && line !== '' && !line.startsWith('>'))
+      joined.push('');
     joined.push(line);
+    if (run >= 3 && line.slice(run).trim() === '') {
+      if (fenceLength === 0) fenceLength = run;
+      else if (run >= fenceLength) fenceLength = 0;
+    }
   }
   return joined.join('\n');
 }

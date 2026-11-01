@@ -3,10 +3,9 @@
  * IANA XML registry by id. Reads a known id without the protocol index (the
  * index is consulted only to fix a mis-cased id after a 404), keys every row by
  * its table's key column, matches `value` against that column or the one
- * `field` names (numbers by value, `0x` byte sequences by their digits as
- * written), names the other columns holding a value its key match left out,
- * ranks `contains` hits with an equal field first, pages through an explicit
- * 48,000-character records budget with per-field and per-record caps, and binds
+ * `field` names (signed ranges and scalar hex by number, byte sequences by
+ * their width), names the other columns holding a value its key match left out,
+ * ranks `contains` hits with an equal field first, pages whole records by limit, and binds
  * every cursor to the filters that minted it. A table's first page also carries
  * the registry root's notes and the tables it nests, and a registry id that
  * names a table inside another registry's file reads that table.
@@ -27,13 +26,11 @@ import { compileQuery, matchesQuery, normalizeForSearch } from '@/services/regis
 import type {
   Loaded,
   ProtocolIndex,
-  Reference,
-  RegistrationRange,
-  RegistryNote,
   RegistryRecord,
   RegistryTable,
   XmlRegistry,
 } from '@/services/registry/types.js';
+import { valueMatcher } from '@/services/registry/value-matcher.js';
 import { type CallBudget, startCallBudget } from '@/services/upstream/call-budget.js';
 import {
   discloseList,
@@ -46,6 +43,7 @@ import {
   datesLine,
   inline,
   joinLines,
+  literal,
   quote,
   referenceLines,
   sourceLines,
@@ -73,29 +71,6 @@ const PLAIN_TEXT_REGISTRIES: ReadonlyMap<string, { file: string; tool: string }>
 /** The registry date a cursor may carry; any other `u` is ignored. */
 const CURSOR_DATE = /^\d{4}-\d{2}-\d{2}$/;
 
-/** Serialized `records` array ceiling per page. */
-const RECORDS_BUDGET = 48_000;
-/** Combined note text on the first page. */
-const NOTES_BUDGET = 4_000;
-/** Longest field value returned; a longer one is cut to this length, ending in `…`. */
-const FIELD_MAX = 2_000;
-/** Most fields one record keeps. */
-const MAX_FIELDS = 16;
-/** Most names one record's `cut_fields` lists: every kept field cut at {@link FIELD_MAX}, and as many dropped ones. */
-const MAX_CUT_FIELDS = 2 * MAX_FIELDS;
-/** Most references a table or a record keeps (probed maximum: 9, on a record). */
-const MAX_REFERENCES = 25;
-/** Most registration ranges a table keeps (probed maximum: 8). */
-const MAX_RANGES = 25;
-/** Most columns a table lists (probed maximum: 10). */
-const MAX_COLUMNS = 50;
-/** Most notes the first page returns, notes and registry_notes together (probed maximum: 19). */
-const MAX_NOTES = 25;
-/** Most sub-registries a listing or an `unknown_subregistry` error names (probed maximum: 127). */
-const MAX_SUBREGISTRIES = 250;
-/** Most files a `non_xml_registry` error names (probed maximum: 1). */
-const MAX_FILES = 25;
-
 /** Splits the `registry` input into an id and an optional URL fragment. */
 function parseRegistryInput(registry: string): { fragment?: string; id: string } {
   const match = REGISTRY_URL.exec(registry);
@@ -103,122 +78,19 @@ function parseRegistryInput(registry: string): { fragment?: string; id: string }
   return { id: match[1], ...(match[2] ? { fragment: match[2] } : {}) };
 }
 
-/** Cuts text to {@link FIELD_MAX} characters ending in `…`, never splitting a surrogate pair. */
-function capText(text: string): { cut: boolean; text: string } {
-  if (text.length <= FIELD_MAX) return { cut: false, text };
-  let end = FIELD_MAX - 1;
-  const last = text.charCodeAt(end - 1);
-  if (last >= 0xd800 && last <= 0xdbff) end--;
-  return { cut: true, text: `${text.slice(0, end)}…` };
-}
-
-/** {@link capText}'s text, for a value whose cut is disclosed by its ending `…` alone. */
-const capped = (text: string) => capText(text).text;
-
-/** A table's ranges, at most {@link MAX_RANGES}, each text capped. */
-function capRanges(ranges: readonly RegistrationRange[]): RegistrationRange[] {
-  return ranges.slice(0, MAX_RANGES).map(({ range, procedure, note }) => ({
-    range: capped(range),
-    ...(procedure ? { procedure: capped(procedure) } : {}),
-    ...(note ? { note: capped(note) } : {}),
-  }));
-}
-
-/** `Showing the first {max} of {total} {noun}.` when a list was cut at `max`. */
-const cutNotice = (total: number, max: number, noun: string) =>
-  total > max && `Showing the first ${max} of ${total} ${noun}.`;
-
-/**
- * A reference with each text capped. A URL longer than {@link FIELD_MAX} is
- * dropped rather than cut, since a cut URL would lead somewhere else.
- */
-function capReference({ type, id, url, section, label }: Reference): Reference {
-  return {
-    type,
-    id: capped(id),
-    ...(url && url.length <= FIELD_MAX ? { url } : {}),
-    ...(section ? { section: capped(section) } : {}),
-    ...(label ? { label: capped(label) } : {}),
-  };
-}
-
-/** The first {@link MAX_REFERENCES} references, each capped. */
-const capReferences = (references: readonly Reference[]) =>
-  references.slice(0, MAX_REFERENCES).map(capReference);
-
-/**
- * A record as returned, keyed by its `valueField` cell (absent when the record
- * has none), and whether its `cut_fields` list passed {@link MAX_CUT_FIELDS}.
- */
+/** A complete record, keyed by its table's key column when present. */
 function toRecordOutput(entry: RegistryRecord, valueField: string | undefined) {
   const key = valueField === undefined ? undefined : entry.fields[valueField];
-  const fields: Record<string, string> = {};
-  const cutFields: string[] = [];
-  Object.entries(entry.fields).forEach(([name, text], index) => {
-    if (index >= MAX_FIELDS) {
-      cutFields.push(name);
-      return;
-    }
-    const cut = capText(text);
-    fields[capped(name)] = cut.text;
-    if (cut.cut) cutFields.push(name);
-  });
-  const record = {
-    ...(key !== undefined ? { value: capped(key) } : {}),
-    fields,
-    references: capReferences(entry.references),
-    ...(entry.registered ? { registered: capped(entry.registered) } : {}),
-    ...(entry.updated ? { updated: capped(entry.updated) } : {}),
-    ...(cutFields.length > 0 ? { cut_fields: cutFields.slice(0, MAX_CUT_FIELDS).map(capped) } : {}),
-  };
-  return { record, cutFieldsOver: cutFields.length > MAX_CUT_FIELDS };
-}
-
-type RecordOutput = ReturnType<typeof toRecordOutput>['record'];
-
-/** A note with its title and anchor capped. */
-const capNote = ({ text, anchor, title }: RegistryNote): RegistryNote => ({
-  text,
-  ...(anchor ? { anchor: capped(anchor) } : {}),
-  ...(title ? { title: capped(title) } : {}),
-});
-
-/**
- * The table's notes, then the registry root's, sharing the first
- * {@link MAX_NOTES} notes and {@link NOTES_BUDGET} characters of text; the note
- * that crosses the budget is cut. `notice` discloses a count cut, and is `false`
- * when the budget cut the notes first.
- */
-function capNotes(
-  tableNotes: readonly RegistryNote[],
-  rootNotes: readonly RegistryNote[] = [],
-): {
-  notes: RegistryNote[];
-  registryNotes: RegistryNote[];
-  notice: string | false;
-  truncated: boolean;
-} {
-  const all = [...tableNotes, ...rootNotes];
-  const kept: RegistryNote[] = [];
-  let used = 0;
-  let truncated = false;
-  for (const note of all.slice(0, MAX_NOTES)) {
-    const room = NOTES_BUDGET - used;
-    if (note.text.length > room) {
-      if (room > 1) kept.push(capNote({ ...note, text: `${note.text.slice(0, room - 1)}…` }));
-      truncated = true;
-      break;
-    }
-    kept.push(capNote(note));
-    used += note.text.length;
-  }
   return {
-    notes: kept.slice(0, tableNotes.length),
-    registryNotes: kept.slice(tableNotes.length),
-    notice: !truncated && cutNotice(all.length, MAX_NOTES, 'notes'),
-    truncated,
+    ...(key !== undefined ? { value: key } : {}),
+    fields: entry.fields,
+    references: entry.references,
+    ...(entry.registered ? { registered: entry.registered } : {}),
+    ...(entry.updated ? { updated: entry.updated } : {}),
   };
 }
+
+type RecordOutput = ReturnType<typeof toRecordOutput>;
 
 /**
  * The id of the sub-registry that `requested` names when the file read for it
@@ -237,11 +109,11 @@ function nestedIn(model: XmlRegistry, table: RegistryTable): RegistryTable[] {
   return model.subregistries.filter((candidate) => candidate.parentId === parentId);
 }
 
-/** The first {@link MAX_SUBREGISTRIES} tables, as a listing names them. */
+/** Every table as named in a listing. */
 const listTables = (tables: readonly RegistryTable[]) =>
-  tables.slice(0, MAX_SUBREGISTRIES).map((candidate) => ({
-    id: capped(candidate.id),
-    title: capped(candidate.title),
+  tables.map((candidate) => ({
+    id: candidate.id,
+    title: candidate.title,
     record_count: candidate.records.length,
   }));
 
@@ -253,79 +125,6 @@ function keyColumn(table: RegistryTable): string | undefined {
 }
 
 const squash = (text: string) => text.replace(/\s+/g, '').toLowerCase();
-/** Digits as a number reads them: leading zeros dropped, one `0` kept. */
-const unpadded = (digits: string) => digits.replace(/^0+(?=.)/, '');
-const DIGITS = /^\d+$/;
-const DECIMAL_RANGE = /^(\d+)-(\d+)$/;
-const HEX_RANGE = /^0x([0-9a-f]+)-0x([0-9a-f]+)$/;
-const HEX_TOKEN = /^0x[0-9a-f]+$/i;
-
-/** Exact ordering of unpadded decimal digits without parsing caller or registry-sized integers. */
-const decimalAtMost = (left: string, right: string) =>
-  left.length < right.length || (left.length === right.length && left <= right);
-
-/**
- * The digits of a hex-form text, as written and lowercased: `0x` tokens only,
- * comma- or space-separated, optionally braced (`0x1301`, `0x13,0x01`,
- * `{0x13, 0x01}`, `0x13 0x01`). `undefined` for any other text.
- */
-function hexForm(text: string): { digits: string; single: boolean } | undefined {
-  let body = text.trim();
-  if (body.startsWith('{') && body.endsWith('}')) body = body.slice(1, -1).trim();
-  const tokens = body.split(/\s*,\s*|\s+/);
-  if (!tokens.every((token) => HEX_TOKEN.test(token))) return;
-  return {
-    digits: tokens
-      .map((token) => token.slice(2))
-      .join('')
-      .toLowerCase(),
-    single: tokens.length === 1,
-  };
-}
-
-/**
- * Exact cell match: trimmed, case- and whitespace-insensitive. A digit string
- * matches a digit cell by number (`0443` finds `443`) and decimal `a-b` cells by
- * numeric bounds, never a hex cell. One `0x` token matches a one-token hex cell
- * by number (`0x5` finds `0x05`) and `0xA-0xB` cells by numeric bounds; any
- * other pair of hex forms compares the digits as written, so `0x1301` finds
- * `0x13,0x01` and `0x13` misses `0x00,0x13`.
- */
-function valueMatcher(value: string): (cell: string | undefined) => boolean {
-  const wanted = squash(value);
-  const digits = DIGITS.test(wanted) ? unpadded(wanted) : undefined;
-  const hex = hexForm(value);
-  const point = hex?.single ? unpadded(hex.digits) : undefined;
-  const pointValue = point === undefined ? undefined : BigInt(`0x${point}`);
-  return (cell) => {
-    if (cell === undefined) return false;
-    const key = squash(cell);
-    if (key === wanted) return true;
-    if (digits !== undefined) {
-      if (DIGITS.test(key)) return unpadded(key) === digits;
-      const range = DECIMAL_RANGE.exec(key) as [string, string, string] | null;
-      return (
-        range !== null &&
-        decimalAtMost(unpadded(range[1]), digits) &&
-        decimalAtMost(digits, unpadded(range[2]))
-      );
-    }
-    if (!hex) return false;
-    const form = hexForm(cell);
-    if (form) {
-      return point !== undefined && form.single
-        ? unpadded(form.digits) === point
-        : form.digits === hex.digits;
-    }
-    if (pointValue === undefined) return false;
-    const range = HEX_RANGE.exec(key);
-    return (
-      range !== null &&
-      BigInt(`0x${range[1]}`) <= pointValue &&
-      pointValue <= BigInt(`0x${range[2]}`)
-    );
-  };
-}
 
 /** `a`, `a and b`, `a, b, and c`. */
 function listWords(words: readonly string[]): string {
@@ -334,9 +133,8 @@ function listWords(words: readonly string[]): string {
     : `${words.slice(0, -1).join(', ')}, and ${words.at(-1)}`;
 }
 
-/** `a, b, c`, then `; {r} more are not named here` when `total` passes the names given. */
-const namedFirst = (names: readonly string[], total: number) =>
-  `${names.map(inline).join(', ')}${total > names.length ? `; ${total - names.length} more are not named here` : ''}`;
+/** Every name in a recovery hint. */
+const named = (names: readonly string[]) => names.map(inline).join(', ');
 
 /** A column holding a looked-up value, and in how many rows. */
 interface Holder {
@@ -349,15 +147,17 @@ interface Holder {
  * each with its row count, most rows first (column order on ties).
  */
 function holdersOf(
-  columns: readonly string[],
+  columns: readonly { name: string; match: (cell: string | undefined) => boolean }[],
   rows: readonly RegistryRecord[],
   skip: string | undefined,
-  holds: (record: RegistryRecord, cell: string | undefined) => boolean,
+  holds: (record: RegistryRecord) => boolean,
 ): Holder[] {
   return columns
-    .slice(0, MAX_COLUMNS)
-    .filter((name) => name !== skip)
-    .map((name) => ({ name, rows: rows.filter((row) => holds(row, row.fields[name])).length }))
+    .filter(({ name }) => name !== skip)
+    .map(({ name, match }) => ({
+      name,
+      rows: rows.filter((row) => match(row.fields[name]) && holds(row)).length,
+    }))
     .filter((holder) => holder.rows > 0)
     .sort((a, b) => b.rows - a.rows);
 }
@@ -365,9 +165,7 @@ function holdersOf(
 /** `{noun} a (2 rows) holds "v"` or `{noun}s a (2 rows) and b (1 row) hold "v"`. */
 function holding(holders: readonly Holder[], value: string, noun: 'Column' | 'column'): string {
   const names = listWords(
-    holders.map(
-      ({ name, rows }) => `${inline(capped(name))} (${rows} ${rows === 1 ? 'row' : 'rows'})`,
-    ),
+    holders.map(({ name, rows }) => `${inline(name)} (${rows} ${rows === 1 ? 'row' : 'rows'})`),
   );
   return holders.length === 1
     ? `${noun} ${names} holds "${echo(value)}"`
@@ -377,7 +175,7 @@ function holding(holders: readonly Holder[], value: string, noun: 'Column' | 'co
 /** The `field` setting that reaches the holders: the one column, or a pointer to the list. */
 function fieldFor(holders: readonly Holder[]): string {
   const [only] = holders;
-  return holders.length === 1 && only ? inline(capped(only.name)) : 'one of those columns';
+  return holders.length === 1 && only ? inline(only.name) : 'one of those columns';
 }
 
 /** The miss hint naming the other columns that hold `value`. */
@@ -480,7 +278,7 @@ const NoteSchema = z
 export const getRegistryRecords = tool('iana_get_registry_records', {
   title: 'Read IANA registry records',
   description:
-    'Read records from any IANA XML registry by id, e.g. registry "tls-parameters" with subregistry "tls-parameters-4" (TLS Cipher Suites), "protocol-numbers", "http-methods", or "cbor-tags"; an iana.org/assignments URL also works. Filter with `value` (exact match on the key column, or on the column `field` names; digits compare by number with a cell of digits ("0443" finds "443") and one 0x token with a one-token 0x cell ("0x5" finds "0x05"), each also matching its own kind of range row ("105-199", "0x11-0xff"); other 0x forms compare their digits as written, in any comma, space, or brace spelling) and `contains` (words in any field; records with a field equal to the words come first). When a registry has several sub-registries and none is given, the response lists them instead of records; a table that nests tables lists them too. Field names are the registry\'s XML element names (e.g. "rec" is the Recommended column). Large registries page through `cursor`. Find ids with iana_search_registries.',
+    'Read records from any IANA XML registry by id, e.g. registry "tls-parameters" with subregistry "tls-parameters-4" (TLS Cipher Suites), "protocol-numbers", "http-methods", or "cbor-tags"; an iana.org/assignments URL also works. Filter with `value` on the key column or the column `field` names: signed decimal points match exact cells, inclusive ranges and strict open bounds; scalar 0x points also compare with decimal cells and established bare-hex columns. Two-byte 0x points match byte-pair ranges and wildcards with their width preserved. An implicit range-only key match yields a miss and a field pointer when another column holds the value exactly. Filter with `contains` for words in any field; records with an equal field come first. When a registry has several sub-registries and none is given, the response lists them instead of records; a table that nests tables lists them too. Field names are the registry\'s XML element names (e.g. "rec" is the Recommended column). Large registries page through `cursor`. Find ids with iana_search_registries.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
     registry: z
@@ -500,7 +298,7 @@ export const getRegistryRecords = tool('iana_get_registry_records', {
       'Sub-registry id, case-insensitive, e.g. "tls-parameters-4". Omit to read the only sub-registry, or to list them when there are several.',
     ),
     value: blankAsUnset(z.string().max(100).optional()).describe(
-      'Exact match on the key column named by value_field (value, else number, else the first column), or on field when set; case and whitespace are ignored. A value of digits compares exactly with a cell of digits, so "0443" finds "443", and also matches decimal range rows without precision loss, including 64-bit endpoints; it never matches a 0x cell. One 0x token compares by number with a one-token 0x cell, so "0x5" finds "0x05", and also matches range rows such as "0x11-0xff". Any other pair of 0x forms compares the digits as written: "0x1301", "{0x13,0x01}", and "0x13 0x01" all find "0x13,0x01", while "0x13" never finds "0x00,0x13".',
+      'Match the key column named by value_field (value, else number, else first column), or field when set; case and whitespace are ignored. Signed decimal points compare without precision loss with exact integers, inclusive a-b or a to b ranges, and strict less than / greater than bounds. Decimal input never gains hexadecimal meaning. One 0x token also compares numerically with decimal cells and ranges; bare hex is recognized only in ieee-802-numbers-1/type_hex and ppp-numbers-2/value. Hex byte forms keep their written width: 0x1301, {0x13,0x01}, and 0x13 0x01 find 0x13,0x01; 0x0013 finds 0x00,0x13 but 0x13 does not. Two-byte points also match 0xHH,0xLL-MM, 0xHH,* and 0xAA-BB,* rows. Scalar hex ranges such as 0x11-0xff and literal range equality remain supported. An implicit range-only match with an exact alternate-column hit returns a miss naming field; explicit field selection is authoritative.',
     ),
     field: blankAsUnset(z.string().max(100).optional()).describe(
       'Column for value to match instead of the key column, case-insensitive, one of the names in columns: e.g. "type" for a DNS RR type mnemonic, or "name" for every row of a service name. Ignored without value.',
@@ -521,19 +319,17 @@ export const getRegistryRecords = tool('iana_get_registry_records', {
     registration_procedure: z
       .string()
       .optional()
-      .describe(
-        'Registration rule of the table read, or of the registry when listing; at most 2,000 characters.',
-      ),
+      .describe('Registration rule of the table read, or of the registry when listing.'),
     description: z
       .string()
       .optional()
       .describe(
-        'Description of the table read, or of the registry when listing; a YANG module registry names its module file here. At most 2,000 characters.',
+        'Description of the table read, or of the registry when listing; a YANG module registry names its module file here.',
       ),
     references: z
       .array(ReferenceSchema)
       .optional()
-      .describe('The documents that define the table read, the first 25.'),
+      .describe('The documents that define the table read.'),
     registration_ranges: z
       .array(
         z
@@ -545,27 +341,21 @@ export const getRegistryRecords = tool('iana_get_registry_records', {
           .describe('One allocation range.'),
       )
       .optional()
-      .describe(
-        'Allocation ranges, when the table defines them: the first 25, each text at most 2,000 characters.',
-      ),
+      .describe('Allocation ranges, when the table defines them.'),
     notes: z
       .array(NoteSchema)
-      .describe(
-        'Notes of the table read (of the registry, when listing), first page only. With registry_notes: the first 25 and 4,000 characters at most, these first.',
-      ),
+      .describe('Notes of the table read (of the registry, when listing), first page only.'),
     registry_notes: z
       .array(NoteSchema)
       .optional()
       .describe(
-        "The registry root's notes and footnotes, on the first page of a sub-registry read; records cite them by anchor. Shares the notes caps, after notes.",
+        "The registry root's notes and footnotes, on the first page of a sub-registry read; records cite them by anchor.",
       ),
     notes_truncated: z
       .boolean()
       .optional()
-      .describe('True when notes or registry_notes were cut at 4,000 characters.'),
-    columns: z
-      .array(z.string())
-      .describe('Field (XML element) names seen, first-seen order, the first 50.'),
+      .describe('Indicates truncated notes when present; omitted for whole notes.'),
+    columns: z.array(z.string()).describe('Field (XML element) names seen, in first-seen order.'),
     value_field: z
       .string()
       .optional()
@@ -582,23 +372,19 @@ export const getRegistryRecords = tool('iana_get_registry_records', {
               .describe("The record's value_field cell; absent when the record has none."),
             fields: z
               .record(z.string(), z.string())
-              .describe('Values keyed by XML element name, each capped at 2,000 characters.'),
-            references: z
-              .array(ReferenceSchema)
-              .describe('References on the record, the first 25.'),
+              .describe('Whole values keyed by XML element name.'),
+            references: z.array(ReferenceSchema).describe('References on the record.'),
             registered: z.string().optional().describe('Registration date.'),
             updated: z.string().optional().describe('Last-updated date.'),
             cut_fields: z
               .array(z.string())
               .optional()
-              .describe(
-                'Fields cut at 2,000 characters (ending in …) or past the 16-field cap, the first 32.',
-              ),
+              .describe('Names of cut fields when present; omitted for whole records.'),
           })
           .describe('One registry record.'),
       )
       .describe(
-        'Records in registry order (with contains, records with a field equal to the words first), up to limit and a 48,000-character page budget.',
+        'Whole records in registry order (with contains, records with a field equal to the words first), up to limit.',
       ),
     subregistries: z
       .array(
@@ -612,7 +398,7 @@ export const getRegistryRecords = tool('iana_get_registry_records', {
       )
       .optional()
       .describe(
-        'Tables to read next, the first 250: every sub-registry when one must be chosen (records is then empty), or the tables nested directly in the table read, on its first page.',
+        'Tables to read next: every sub-registry when one must be chosen (records is then empty), or the tables nested directly in the table read, on its first page.',
       ),
     offset: z
       .number()
@@ -732,7 +518,7 @@ export const getRegistryRecords = tool('iana_get_registry_records', {
       });
     }
     const { model, source } = loaded;
-    const registryId = capped(model.id);
+    const registryId = model.id;
 
     const tables = tablesOf(model);
     const selectable = tables.filter((table) => table !== model.root || table.records.length > 0);
@@ -742,7 +528,7 @@ export const getRegistryRecords = tool('iana_get_registry_records', {
       const wanted = requestedSub.toLowerCase();
       table = tables.find((candidate) => candidate.id.toLowerCase() === wanted);
       if (!table) {
-        const ids = selectable.slice(0, MAX_SUBREGISTRIES).map((candidate) => capped(candidate.id));
+        const ids = selectable.map((candidate) => candidate.id);
         throw ctx.fail(
           'unknown_subregistry',
           `"${requestedSub}" is not a sub-registry of ${inline(registryId)}.`,
@@ -753,7 +539,7 @@ export const getRegistryRecords = tool('iana_get_registry_records', {
             recovery: {
               hint:
                 ids.length > 0
-                  ? `Call iana_get_registry_records again with subregistry set to one of: ${namedFirst(ids, selectable.length)}.`
+                  ? `Call iana_get_registry_records again with subregistry set to one of: ${named(ids)}.`
                   : `${inline(registryId)} has no sub-registries; call iana_get_registry_records again without subregistry.`,
             },
           },
@@ -769,11 +555,11 @@ export const getRegistryRecords = tool('iana_get_registry_records', {
     const isRoot = table === model.root;
 
     if (table && fileOnly(table)) {
-      const tableId = capped(table.id);
-      const urls = table.files.slice(0, MAX_FILES).map((file) => capped(file.url));
+      const tableId = table.id;
+      const urls = table.files.map((file) => file.url);
       throw ctx.fail(
         'non_xml_registry',
-        `${inline(tableId)} is published ${publishedAs(table)} (${namedFirst(urls, table.files.length)}); its XML file holds no records.`,
+        `${inline(tableId)} is published ${publishedAs(table)} (${named(urls)}); its XML file holds no records.`,
         {
           registry: registryId,
           ...(isRoot ? {} : { subregistry: tableId }),
@@ -795,8 +581,8 @@ export const getRegistryRecords = tool('iana_get_registry_records', {
       const wanted = input.field.toLowerCase();
       field = table.columns.find((column) => column.toLowerCase() === wanted);
       if (field === undefined) {
-        const tableId = capped(table.id);
-        const columns = table.columns.slice(0, MAX_COLUMNS).map(capped);
+        const tableId = table.id;
+        const columns = table.columns;
         throw ctx.fail(
           'unknown_field',
           `"${inline(echo(input.field))}" is not a column of ${inline(tableId)}.`,
@@ -808,7 +594,7 @@ export const getRegistryRecords = tool('iana_get_registry_records', {
             recovery: {
               hint:
                 columns.length > 0
-                  ? `Call iana_get_registry_records again with field set to one of: ${namedFirst(columns, table.columns.length)}.`
+                  ? `Call iana_get_registry_records again with field set to one of: ${named(columns)}.`
                   : `${inline(tableId)} has no columns; call iana_get_registry_records again without field.`,
             },
           },
@@ -837,11 +623,10 @@ export const getRegistryRecords = tool('iana_get_registry_records', {
     const firstPage = offset === 0;
     const header = {
       registry_id: registryId,
-      registry_title: capped(model.title),
+      registry_title: model.title,
     };
 
     if (!table) {
-      const rootNotes = capNotes(firstPage ? model.root.notes : []);
       const unapplied = [
         input.value !== undefined && 'value',
         input.contains !== undefined && 'contains',
@@ -856,18 +641,15 @@ export const getRegistryRecords = tool('iana_get_registry_records', {
           `This registry has ${selectable.length} sub-registries; call again with subregistry set to one of the listed ids.`,
           unapplied.length > 0 &&
             `${listWords(unapplied)} ${unapplied.length === 1 ? 'was' : 'were'} not applied; filters apply only to the records of one sub-registry.`,
-          cutNotice(selectable.length, MAX_SUBREGISTRIES, 'sub-registries'),
-          rootNotes.notice,
         ],
       });
       return {
         ...header,
         ...(model.root.registrationRule
-          ? { registration_procedure: capped(model.root.registrationRule) }
+          ? { registration_procedure: model.root.registrationRule }
           : {}),
-        ...(model.root.description ? { description: capped(model.root.description) } : {}),
-        notes: rootNotes.notes,
-        ...(rootNotes.truncated ? { notes_truncated: true } : {}),
+        ...(model.root.description ? { description: model.root.description } : {}),
+        notes: firstPage ? model.root.notes : [],
         columns: [],
         records: [],
         subregistries: listTables(selectable),
@@ -877,7 +659,15 @@ export const getRegistryRecords = tool('iana_get_registry_records', {
 
     const valueField = keyColumn(table);
     const column = field ?? valueField;
-    const matchValue = input.value === undefined ? undefined : valueMatcher(input.value);
+    const bareHexColumn = (name: string | undefined) =>
+      (table.id === 'ieee-802-numbers-1' && name === 'type_hex') ||
+      (table.id === 'ppp-numbers-2' && name === 'value');
+    const matchValue =
+      input.value === undefined ? undefined : valueMatcher(input.value, bareHexColumn(column));
+    const exactValue =
+      input.value === undefined
+        ? undefined
+        : valueMatcher(input.value, bareHexColumn(column), false);
     const query = input.contains === undefined ? undefined : compileQuery(input.contains);
     const passesContains = (record: RegistryRecord) =>
       !query || matchesQuery(record.searchText, query);
@@ -896,42 +686,39 @@ export const getRegistryRecords = tool('iana_get_registry_records', {
       return passesContains(record);
     });
     const words = input.contains === undefined ? undefined : normalizeForSearch(input.contains);
-    const matches =
+    let matches =
       words === undefined
         ? filtered
         : exactFirst(filtered, (record) =>
             Object.values(record.fields).some((text) => normalizeForSearch(text) === words),
           );
-    const holdersIn = (rows: readonly RegistryRecord[]) =>
-      matchValue
-        ? holdersOf(
-            table.columns,
-            rows,
-            column,
-            (record, cell) => matchValue(cell) && passesContains(record),
-          )
-        : [];
+    const holdersIn = (rows: readonly RegistryRecord[], ranges = true) => {
+      if (input.value === undefined) return [];
+      const value = input.value;
+      const matchers = table.columns.map((name) => ({
+        name,
+        match: valueMatcher(value, bareHexColumn(name), ranges),
+      }));
+      return holdersOf(matchers, rows, column, passesContains);
+    };
+    /** An alternate exact cell must not silently resolve to an unrelated key range. */
+    if (
+      field === undefined &&
+      input.value !== undefined &&
+      matches.length > 0 &&
+      !matches.some((record) =>
+        exactValue?.(column === undefined ? undefined : record.fields[column]),
+      )
+    ) {
+      const alternate = holdersIn(table.records, false);
+      if (alternate.length > 0) matches = [];
+    }
     const holders = matches.length === 0 ? holdersIn(table.records) : [];
     const keylessHolders = matches.length > 0 && keyless.length > 0 ? holdersIn(keyless) : [];
 
-    const records: RecordOutput[] = [];
-    let used = 2;
-    let budgetCut = false;
-    let referencesCut = 0;
-    let cutFieldsCut = 0;
-    for (const match of matches.slice(offset)) {
-      if (records.length >= input.limit) break;
-      const { record, cutFieldsOver } = toRecordOutput(match, valueField);
-      const size = JSON.stringify(record).length + (records.length > 0 ? 1 : 0);
-      if (records.length > 0 && used + size > RECORDS_BUDGET) {
-        budgetCut = true;
-        break;
-      }
-      records.push(record);
-      used += size;
-      if (match.references.length > MAX_REFERENCES) referencesCut++;
-      if (cutFieldsOver) cutFieldsCut++;
-    }
+    const records: RecordOutput[] = matches
+      .slice(offset, offset + input.limit)
+      .map((record) => toRecordOutput(record, valueField));
     const nextOffset = offset + records.length;
     const more = nextOffset < matches.length;
     const nextCursor = more
@@ -944,7 +731,7 @@ export const getRegistryRecords = tool('iana_get_registry_records', {
       : undefined;
 
     const remaining = matches.length - nextOffset;
-    const columnName = inline(column === undefined ? 'key' : capped(column));
+    const columnName = inline(column === undefined ? 'key' : column);
     const missed = listWords(
       [
         input.value !== undefined && `has ${columnName} "${echo(input.value)}"`,
@@ -963,11 +750,8 @@ export const getRegistryRecords = tool('iana_get_registry_records', {
       keylessHint(keylessHolders, columnName, input.value);
     const mintedFor =
       typeof cursor?.u === 'string' && CURSOR_DATE.test(cursor.u) ? cursor.u : undefined;
-    const tableId = capped(table.id);
-    const notes = capNotes(
-      firstPage ? table.notes : [],
-      firstPage && !isRoot ? model.root.notes : [],
-    );
+    const tableId = table.id;
+    const registryNotes = firstPage && !isRoot ? model.root.notes : [];
     const nested = firstPage ? nestedIn(model, table) : [];
     discloseList(ctx.enrich, {
       total: matches.length,
@@ -982,7 +766,6 @@ export const getRegistryRecords = tool('iana_get_registry_records', {
         table.records.length === 0 &&
           nested.length > 0 &&
           `It nests ${nested.length} ${nested.length === 1 ? 'table' : 'tables'}; call again with subregistry set to one of the listed ids.`,
-        cutNotice(nested.length, MAX_SUBREGISTRIES, 'sub-registries'),
         table.records.length > 0 &&
           matches.length === 0 &&
           `No record in ${inline(tableId)} ${missed}. ${missHint}`,
@@ -996,37 +779,22 @@ export const getRegistryRecords = tool('iana_get_registry_records', {
         mintedFor !== undefined &&
           mintedFor !== (source.registry_updated ?? '') &&
           `The registry was updated since this cursor was minted (${inline(mintedFor)} → ${inline(source.registry_updated ?? 'no date')}); record offsets may have shifted.`,
-        cutNotice(table.references.length, MAX_REFERENCES, 'table references'),
-        cutNotice(table.ranges.length, MAX_RANGES, 'registration ranges'),
-        notes.notice,
-        cutNotice(table.columns.length, MAX_COLUMNS, 'columns'),
-        referencesCut > 0 &&
-          (referencesCut === 1
-            ? `One record on this page lists more than ${MAX_REFERENCES} references; only the first ${MAX_REFERENCES} are shown.`
-            : `${referencesCut} records on this page list more than ${MAX_REFERENCES} references; only the first ${MAX_REFERENCES} of each are shown.`),
-        cutFieldsCut > 0 &&
-          (cutFieldsCut === 1
-            ? `One record on this page has more than ${MAX_CUT_FIELDS} cut fields; its cut_fields names only the first ${MAX_CUT_FIELDS}.`
-            : `${cutFieldsCut} records on this page have more than ${MAX_CUT_FIELDS} cut fields; cut_fields names only the first ${MAX_CUT_FIELDS} of each.`),
         more &&
-          (budgetCut
-            ? `This page stopped at the ${RECORDS_BUDGET.toLocaleString('en-US')}-character output budget after ${records.length} records; ${remaining} more match. Pass next_cursor as cursor to continue.`
-            : `${remaining} more records match; pass next_cursor as cursor to continue${input.limit < 100 ? ', or raise limit (max 100)' : ''}.`),
+          `${remaining} more records match; pass next_cursor as cursor to continue${input.limit < 100 ? ', or raise limit (max 100)' : ''}.`,
       ],
     });
 
     return {
       ...header,
-      ...(isRoot ? {} : { subregistry_id: tableId, subregistry_title: capped(table.title) }),
-      ...(table.registrationRule ? { registration_procedure: capped(table.registrationRule) } : {}),
-      ...(table.description ? { description: capped(table.description) } : {}),
-      ...(table.references.length > 0 ? { references: capReferences(table.references) } : {}),
-      ...(table.ranges.length > 0 ? { registration_ranges: capRanges(table.ranges) } : {}),
-      notes: notes.notes,
-      ...(notes.registryNotes.length > 0 ? { registry_notes: notes.registryNotes } : {}),
-      ...(notes.truncated ? { notes_truncated: true } : {}),
-      columns: table.columns.slice(0, MAX_COLUMNS).map(capped),
-      ...(valueField === undefined ? {} : { value_field: capped(valueField) }),
+      ...(isRoot ? {} : { subregistry_id: tableId, subregistry_title: table.title }),
+      ...(table.registrationRule ? { registration_procedure: table.registrationRule } : {}),
+      ...(table.description ? { description: table.description } : {}),
+      ...(table.references.length > 0 ? { references: table.references } : {}),
+      ...(table.ranges.length > 0 ? { registration_ranges: table.ranges } : {}),
+      notes: firstPage ? table.notes : [],
+      ...(registryNotes.length > 0 ? { registry_notes: registryNotes } : {}),
+      columns: table.columns,
+      ...(valueField === undefined ? {} : { value_field: valueField }),
       records,
       ...(nested.length > 0 ? { subregistries: listTables(nested) } : {}),
       ...(firstPage ? {} : { offset }),
@@ -1036,6 +804,8 @@ export const getRegistryRecords = tool('iana_get_registry_records', {
   },
 
   format: (result) => {
+    const whitespaceSensitive = (text: string) => /[\t\r\n]| {2}|^ | $|`/.test(text);
+    const renderText = (text: string) => (whitespaceSensitive(text) ? literal(text) : quote(text));
     const lines = [`## ${inline(result.registry_title)} (${inline(result.registry_id)})`];
     const titled = (title: string | undefined) => (title ? ` — ${inline(title)}` : '');
     if (result.subregistry_id) {
@@ -1044,10 +814,12 @@ export const getRegistryRecords = tool('iana_get_registry_records', {
       );
     }
     if (result.registration_procedure) {
-      lines.push(`**Registration procedure:** ${inline(result.registration_procedure)}`);
+      if (whitespaceSensitive(result.registration_procedure)) {
+        lines.push('', '**Registration procedure:**', literal(result.registration_procedure));
+      } else lines.push(`**Registration procedure:** ${inline(result.registration_procedure)}`);
     }
     if (result.description) {
-      lines.push('', '**Description:**', quote(result.description));
+      lines.push('', '**Description:**', renderText(result.description));
     }
     if (result.references?.length) {
       lines.push('**Registry references:**', ...referenceLines(result.references));
@@ -1055,6 +827,16 @@ export const getRegistryRecords = tool('iana_get_registry_records', {
     if (result.registration_ranges?.length) {
       lines.push('**Registration ranges:**');
       for (const range of result.registration_ranges) {
+        if (
+          [range.range, range.procedure, range.note].some(
+            (text) => text !== undefined && whitespaceSensitive(text),
+          )
+        ) {
+          lines.push('', '**Range:**', renderText(range.range));
+          if (range.procedure) lines.push('**Procedure:**', renderText(range.procedure));
+          if (range.note) lines.push('**Range note:**', renderText(range.note));
+          continue;
+        }
         const procedure = range.procedure ? ` — ${inline(range.procedure)}` : '';
         const note = range.note ? ` (${inline(range.note)})` : '';
         lines.push(`- ${inline(range.range)}${procedure}${note}`);
@@ -1067,12 +849,10 @@ export const getRegistryRecords = tool('iana_get_registry_records', {
     for (const { label, note } of notes) {
       const title = note.title ? ` (${inline(note.title)})` : '';
       const anchor = note.anchor ? ` [anchor ${inline(note.anchor)}]` : '';
-      lines.push('', `**${label}${title}${anchor}:**`, quote(note.text));
+      lines.push('', `**${label}${title}${anchor}:**`, renderText(note.text));
     }
     if (result.notes_truncated) {
-      lines.push(
-        `*Notes cut at the ${NOTES_BUDGET.toLocaleString('en-US')}-character budget (notes_truncated: true).*`,
-      );
+      lines.push('*Notes were truncated (notes_truncated: true).*');
     }
     if (result.subregistries) {
       lines.push('', `**Sub-registries (${result.subregistries.length}):**`);
@@ -1091,7 +871,12 @@ export const getRegistryRecords = tool('iana_get_registry_records', {
     result.records.forEach((record, index) => {
       lines.push('', `#### ${inline(record.value ?? `Record ${before + index + 1}`)}`);
       for (const [name, text] of Object.entries(record.fields)) {
-        if (name === result.value_field && text === record.value) continue;
+        if (name === result.value_field && text === record.value && !whitespaceSensitive(text))
+          continue;
+        if (whitespaceSensitive(text)) {
+          lines.push('', `**${inline(name)}:**`, literal(text));
+          continue;
+        }
         const [first = '>', ...rest] = quote(text).split('\n');
         lines.push(`> **${inline(name)}:** ${first.slice(2)}`, ...rest);
       }

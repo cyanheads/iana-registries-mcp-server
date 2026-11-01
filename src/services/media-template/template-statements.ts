@@ -7,8 +7,8 @@
  * other label line), drop every line holding an email-shaped token or opening
  * with a contact word and every continuation line that is only a personal name
  * (a name-shaped line holding a statement word such as `Limited Use` or
- * `Not Applicable` is a value, not a name, and stays), then cut what is left to
- * 300 characters. Nothing else in the template is read.
+ * `Not Applicable` is a value, not a name, and stays). Surviving statements are
+ * returned whole. Nothing else in the template is read.
  * @module services/media-template/template-statements
  */
 
@@ -21,9 +21,6 @@ export interface TemplateStatements {
   /** `Intended usage:` statement. */
   intendedUsage?: string;
 }
-
-/** Longest statement kept, in characters, after the line filter runs. */
-export const STATEMENT_MAX_CHARS = 300;
 
 /** Optional leading whitespace and `2.`-style numbering in front of a label. */
 const LABEL_LEAD = String.raw`^\s*(?:\d+\.\s*)?`;
@@ -80,9 +77,8 @@ function keepLine(line: string, continuation: boolean): boolean {
 
 /**
  * The statement whose label sits on `lines[start]`: the value after the colon
- * plus continuation lines, line-filtered, then cut to {@link STATEMENT_MAX_CHARS}
- * code points. Filtering first means a cut never leaves part of a dropped line.
- * `undefined` when nothing survives.
+ * plus continuation lines, with contact lines removed. `undefined` when nothing
+ * survives.
  */
 function statementAt(lines: readonly string[], start: number, label: RegExp): string | undefined {
   const extent = [(lines[start] ?? '').replace(label, '').trim()];
@@ -91,5 +87,5 @@ function statementAt(lines: readonly string[], start: number, label: RegExp): st
     extent.push(line.trim());
   }
   const kept = extent.filter((line, index) => line !== '' && keepLine(line, index > 0)).join('\n');
-  return Array.from(kept).slice(0, STATEMENT_MAX_CHARS).join('').trim() || undefined;
+  return kept || undefined;
 }

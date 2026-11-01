@@ -5,8 +5,9 @@
  * each extension, Datatracker `/doc/`, `/doc/html/`, and `/doc/id/` paths
  * including a `/NN/` revision, ietf.org `/id/` and `/archive/id/`, series
  * pages on the RFC Editor and Datatracker) and the near misses that stay
- * unsupported, string and array `ids` (a string starting with `[` is not split
- * on commas; a URL's query and fragment dropped before the 200-character cap),
+ * unsupported, string and array `ids` (JSON-array strings are parsed first;
+ * citation brackets and section qualifiers survive scalar splitting; a URL's
+ * query and fragment are dropped before the 200-character cap),
  * ids resolving to one document fetched once, BCP / STD / FYI ids as series
  * with their member RFCs, each RFC's series (`is_also`) from one membership
  * read per call (a page with more after it leaves `is_also` out), a
@@ -190,6 +191,204 @@ const RFC_8001: Doc = {
 };
 
 const SINGLE_ID_PAGE = { total_ids: 1, deferred_ids: [], deferred_count: 0 };
+
+describe('iana_get_rfc_status: citation forms', () => {
+  it.each([
+    '[RFC8001]',
+    'RFC 8001, Section 15.5.5',
+    '[RFC8001, Section 15.5.5]',
+    '10.17487/RFC8001',
+    'doi:10.17487/RFC8001',
+    'https://doi.org/10.17487/RFC8001',
+    'https://www.rfc-editor.org/errata/rfc8001',
+  ])('resolves citation %s in scalar, array, and JSON-array inputs', async (id) => {
+    for (const ids of [id, [id], JSON.stringify([id])]) {
+      const s = boot();
+      serveRfc(s, 8001);
+      const out = await call({ ids });
+      expect(out.isError).toBe(false);
+      expect(docs(out)).toEqual([RFC_8001]);
+      expect(out.text).toContain('### RFC 8001');
+      expect(s.fetches()).toBe(3);
+      if (id.includes('Section')) {
+        expect(out.structured.notice).toContain('Section 15.5.5');
+        expect(out.text).toContain(String(out.structured.notice));
+      }
+    }
+  });
+
+  it.each(['I-D.example-wg-topic', '[I-D.example-wg-topic]', '[I-D.example-wg-topic-03]'])(
+    'resolves %s locally',
+    async (id) => {
+      const s = boot();
+      serveDraft(s, DRAFT);
+      s.serve({ [docUrl(`${DRAFT}-03`)]: notFound });
+      const out = await call({ ids: id });
+      expect(docIds(out)).toEqual([DRAFT]);
+      expect(docs(out)[0]?.kind).toBe('draft');
+      expect(out.text).toContain(`### ${DRAFT}`);
+      if (id.includes('-03')) {
+        expect(docs(out)[0]?.draft?.requested_revision).toBe('03');
+        expect(out.text).toContain('(requested -03)');
+      }
+      expect(s.fetches()).toBe(id.includes('-03') ? 4 : 3);
+    },
+  );
+
+  it('retains every distinct selected alias section alongside existing notices', async () => {
+    const s = boot();
+    serveRfc(s, 8001, { tracking: notFound });
+    const out = await call({
+      ids: ['RFC8001', '[RFC8001], Section 1.2', 'rfc8001, Section 3', 'RFC8001, Section 1.2'],
+    });
+    expect(out.structured.total_ids).toBe(1);
+    expect(docIds(out)).toEqual(['RFC 8001']);
+    expect(out.structured.notice).toBe(
+      'Stream and working group were unavailable for RFC 8001; status and relations come from the RFC Editor. Section 1.2 of RFC 8001 was ignored; this tool returns document-level status. Section 3 of RFC 8001 was ignored; this tool returns document-level status.',
+    );
+    expect(out.text).toContain(String(out.structured.notice));
+    expect(s.fetches()).toBe(3);
+  });
+
+  it('roundtrips both returned RFC references in one canonical request', async () => {
+    const s = boot();
+    serveRfc(s, 8001);
+    const initial = await call({ ids: ['RFC 8001'] });
+    const rfc = docs(initial)[0]?.rfc;
+    const before = s.fetches();
+    const out = await call({ ids: [rfc?.doi, rfc?.errata_url] });
+    expect(out.structured.total_ids).toBe(1);
+    expect(docs(out)).toEqual([RFC_8001]);
+    expect(out.text).toContain('**DOI:** 10.17487/RFC8001');
+    expect(out.text).toContain('**Errata:** <https://www.rfc-editor.org/errata/rfc8001>');
+    expect(s.fetches() - before).toBe(3);
+  });
+
+  it('deduplicates aliases of each full draft request without merging revisions', async () => {
+    const s = boot();
+    serveDraft(s, DRAFT);
+    for (const rev of ['03', '02', '99']) s.serve({ [docUrl(`${DRAFT}-${rev}`)]: notFound });
+    const requests = [DRAFT, `${DRAFT}-03`, `${DRAFT}-02`, `${DRAFT}-99`];
+    const out = await call({
+      ids: requests.flatMap((id) => [id, `[I-D.${id.slice(6)}]`, `${id}, Section 2.1`]),
+    });
+    expect(out.structured.total_ids).toBe(4);
+    expect(docs(out).map((doc) => doc.draft?.requested_revision)).toEqual([
+      undefined,
+      '03',
+      '02',
+      '99',
+    ]);
+    expect(out.text).toContain('(requested -03)');
+    expect(out.text).toContain('(requested -02)');
+    expect(out.text).toContain('(requested -99)');
+    expect(docs(out)[3]?.guidance).toBe(`${DRAFT} has no revision -99; the latest is -03.`);
+    expect(out.text).toContain(`${DRAFT} has no revision -99; the latest is -03.`);
+    expect(out.structured.notice).toContain(`Section 2.1 of ${DRAFT}-99`);
+    expect(out.text).toContain(String(out.structured.notice));
+    expect(s.fetches()).toBe(15);
+  });
+
+  it('pages normalized citations before admission and discloses sections only on their selected page', async () => {
+    const s = boot();
+    for (let n = 1; n <= 11; n++) serveRfc(s, n, { rfc: notFound, tracking: notFound });
+    const ids = Array.from({ length: 11 }, (_, i) => `[RFC${i + 1}], Section ${i + 1}.1`);
+    ids.splice(1, 0, 'doi:10.17487/RFC1');
+    const first = await call({ ids });
+    expect(first.structured).toMatchObject({
+      total_ids: 11,
+      deferred_ids: ['RFC 11'],
+      next_ids_offset: 10,
+    });
+    expect(docs(first)).toHaveLength(10);
+    expect(first.structured.notice).not.toContain('Section 11.1');
+    expect(first.text).toContain(String(first.structured.notice));
+    const next = await call({ ids, ids_offset: 10 });
+    expect(docIds(next)).toEqual(['RFC 11']);
+    expect(next.structured.notice).toContain('Section 11.1 of RFC 11');
+    expect(next.text).toContain(String(next.structured.notice));
+    const before = s.fetches();
+    const empty = await call({ ids, ids_offset: 12 });
+    expect(empty.structured).toMatchObject({ total_ids: 11, documents: [], deferred_count: 0 });
+    expect(empty.structured.notice).not.toContain('Section');
+    expect(empty.text).toContain(String(empty.structured.notice));
+    expect(s.fetches()).toBe(before);
+  });
+
+  it.each([
+    '[RFC8001',
+    'RFC8001]',
+    '[[RFC8001]]',
+    '[RFC8001]extra',
+    'RFC8001, Section 1..2',
+    'RFC8001, Section 1.',
+    'RFC8001, Section A',
+    '10.17488/RFC8001',
+    'https://doi.org.example/10.17487/RFC8001',
+    'https://user@doi.org/10.17487/RFC8001',
+    'https://doi.org/10.17487/RFC8001/extra',
+    'https://www.rfc-editor.org/errata/rfc8001/extra',
+    'https://rfc-editor.org.example/errata/rfc8001',
+    'I-D.',
+  ])('keeps malformed citation %s unsupported', async (id) => {
+    const s = boot();
+    const out = await call({ ids: [id] });
+    expect(docs(out)).toMatchObject([{ id, kind: 'unsupported', found: false }]);
+    expect(out.text).toContain('**Kind:** unsupported');
+    expect(s.fetches()).toBe(0);
+  });
+});
+
+describe('iana_get_rfc_status: citation characterization', () => {
+  it('keeps base, current, older, and future revision requests distinct', async () => {
+    const s = boot();
+    serveDraft(s, DRAFT);
+    for (const rev of ['03', '02', '99']) s.serve({ [docUrl(`${DRAFT}-${rev}`)]: notFound });
+    const out = await call({ ids: [DRAFT, `${DRAFT}-03`, `${DRAFT}-02`, `${DRAFT}-99`] });
+    expect(out.structured.total_ids).toBe(4);
+    expect(docs(out).map((doc) => doc.draft?.requested_revision)).toEqual([
+      undefined,
+      '03',
+      '02',
+      '99',
+    ]);
+    expect(docs(out)[3]?.guidance).toBe(`${DRAFT} has no revision -99; the latest is -03.`);
+    expect(out.text).toContain('(requested -03)');
+    expect(out.text).toContain('(requested -02)');
+    expect(out.text).toContain('(requested -99)');
+    expect(out.text).toContain(`${DRAFT} has no revision -99; the latest is -03.`);
+  });
+});
+
+describe('iana_get_rfc_status: citation timing', () => {
+  it.each([
+    ['digits', (n: number) => '9'.repeat(n)],
+    ['openers', (n: number) => '['.repeat(n)],
+    ['nested brackets', (n: number) => '['.repeat(n / 2) + ']'.repeat(n / 2)],
+    [
+      'overlapping prefixes',
+      (n: number) => 'RFC8001, Section 1,'.repeat(Math.ceil(n / 18)).slice(0, n),
+    ],
+    ['final line break', (n: number) => `${'§1 x'.repeat(n / 4)}\ny`],
+    ['line breaks throughout', (n: number) => '  \r\n'.repeat(n / 4)],
+  ])('bounds citation input normalization CPU for %s', (_label, makeInput) => {
+    const measure = (length: number) => {
+      const ids = makeInput(length);
+      const start = process.threadCpuUsage();
+      for (let repeat = 0; repeat < 5; repeat++) getRfcStatus.input.safeParse({ ids });
+      const cpu = process.threadCpuUsage(start);
+      return cpu.user + cpu.system;
+    };
+    measure(5_000);
+    const first = measure(5_000);
+    let last = first;
+    for (let length = 10_000; length <= 320_000; length *= 2) {
+      last = measure(length);
+      expect(last).toBeLessThan(500_000);
+    }
+    expect(last / first).toBeLessThan(256);
+  });
+});
 
 const DRAFT_DOC: Doc = {
   id: DRAFT,
@@ -1177,7 +1376,6 @@ describe('iana_get_rfc_status: id forms', () => {
     '2616.txt',
     'rfc8001.doc',
     `${DRAFT}-03.doc`,
-    'https://www.rfc-editor.org/errata/rfc8001',
     'https://www.rfc-editor.org/rfc/pdfrfc/rfc8001.txt.pdf',
     'https://tools.ietf.org/html/rfc8001.html/extra',
     'https://example.org/html/rfc8001',

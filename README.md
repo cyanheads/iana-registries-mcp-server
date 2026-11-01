@@ -1,13 +1,13 @@
 <div align="center">
   <h1>@cyanheads/iana-registries-mcp-server</h1>
   <p><b>Look up IANA ports, media types, HTTP status codes and fields, URI schemes, enterprise numbers, and BCP 47 language tags; check RFC status; search and read any IANA registry via MCP. STDIO or Streamable HTTP.</b>
-  <div>10 Tools</div>
+  <div>10 Tools • 1 Skill</div>
   </p>
 </div>
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.2.1-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/iana-registries-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.3.1-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/iana-registries-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/iana-registries-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.3-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.2.1-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/iana-registries-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.4.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/iana-registries-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/iana-registries-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.4-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -87,9 +87,10 @@ Official IANA protocol registries plus RFC and Internet-Draft status. Look up po
 
 ### `iana_lookup_pen` <sub>tool</sub>
 
-- One of `pen` (a number, or an OID under `1.3.6.1.4.1`) or `organization` words
-- Each entry carries its `oid` prefix and `state` (`assigned`, `reserved`, `unassigned`); `organization_withheld: true` marks an organization line held back because it mixes in contact details
+- One of `pen` (a number, or an OID under `1.3.6.1.4.1`) or `organization` words; OIDs accept a leading dot and case-insensitive `iso.3.6.1.4.1`, `iso.org.dod.internet.private.enterprise(s)`, `SNMPv2-SMI::enterprises`, or `enterprises` prefixes
+- Each entry carries its `oid` prefix and `state` (`assigned`, `reserved`, `unassigned`); whole `Reserved`, `Unassigned`, and `---none---` markers are case-insensitive. `organization_withheld: true` marks an organization line held back because it mixes in contact details
 - An OID with arcs below the enterprise number echoes `requested_oid` and `sub_arcs`; those arcs are assigned by the enterprise, not IANA
+- A non-enterprise OID or the bare enterprise arc fails before fetching, with guidance to discover SMI tables through `iana_search_registries` (`query: "smi"`)
 
 ---
 
@@ -106,7 +107,8 @@ Official IANA protocol registries plus RFC and Internet-Draft status. Look up po
 ### `iana_get_rfc_status` <sub>tool</sub>
 
 - Up to 1,000 normalized nonblank `ids`, canonically deduplicated before selecting ten per call: RFC numbers in any common form; BCP, STD, and FYI numbers (`BCP 14`); draft names with or without a revision suffix; RFC and draft file names (`rfc2616.txt`, `draft-ietf-httpbis-semantics-19.txt`); the URL of an RFC or draft on datatracker.ietf.org, tools.ietf.org, or ietf.org, or of an RFC on rfc-editor.org (`https://tools.ietf.org/html/rfc7231`); and a series URL at rfc-editor.org/info/ or datatracker.ietf.org/doc/ (`https://datatracker.ietf.org/doc/bcp14/`). A URL's query and fragment are dropped
-- `total_ids` counts distinct ids; `deferred_ids` previews the next ten, while `deferred_count` counts the whole remainder. Resubmit the same original `ids` with `next_ids_offset` as `ids_offset` to continue. `deferred_reason: "batch_limit"` and `deferred_guidance` explain the cut; at/past-end offsets return an empty page without upstream requests
+- Citation forms include `[RFC9110]`, `[I-D.ietf-tls-esni]`, `RFC 9110, Section 15.5.5`, RFC DOIs (`10.17487/RFC9110`, `doi:…`, or `https://doi.org/…`), and RFC Editor `/errata/rfcN` URLs. Sections are ignored with a notice: the result describes the document, never section or errata contents
+- `total_ids` counts distinct full requests after syntactic aliases merge; unsuffixed and revision-qualified drafts remain distinct, even when the requested revision is current. `deferred_ids` previews the next ten, while `deferred_count` counts the whole remainder. Resubmit the same original `ids` with `next_ids_offset` as `ids_offset` to continue; at/past-end offsets return an empty page without upstream requests
 - `documents[]` gives RFCs their current and as-published status, stream, group, obsoletes and updates relations, the series they belong to (`is_also`), and errata page; gives drafts their state, IESG state, replacements, and `became_rfc`; and gives a series its member RFCs (`kind: "series"`). An unknown id is `found: false` with `guidance`, and a draft revision past the latest stays found with `guidance` naming the latest
 - An id whose lookup fails lands in `failed[]` while the rest still answer, with its `reason` and, when the failure states it, `retryable` (`false` when calling again fails the same way); the call fails only when every id failed. A call starts at most 20 Datatracker requests (an RFC or a series takes 1, plus 1 per call for the RFCs' series; a draft 3, or 4 with a revision suffix); ids past that come back in `failed[]` with reason `request_limit`, to resubmit
 
@@ -124,9 +126,10 @@ Official IANA protocol registries plus RFC and Internet-Draft status. Look up po
 ### `iana_get_registry_records` <sub>tool</sub>
 
 - A `registry` id or `iana.org/assignments` URL, optional `subregistry`, and filters `value` (exact match on the key column, or on the column `field` names) and `contains` (words in any field, records with an equal field first)
-- `value` digits compare exactly with a cell of digits (`0443` finds `443`) or a decimal range, including 64-bit endpoints. One `0x` token compares by number with a one-token `0x` cell (`0x5` finds `0x05`) or a hex range; other `0x` forms compare their digits as written, in any comma, space, or brace spelling
+- `value` supports exact integers, inclusive signed decimal ranges (`a-b`, `a to b`), and strict `less than` / `greater than` bounds without precision loss. A single `0x` token also compares with decimal cells and established bare-hex columns (EtherType `type_hex`, PPP protocol `value`); bare decimal input never gains hexadecimal meaning
+- Hex byte sequences preserve width across compact, comma, space, and brace forms, including TLS byte ranges and wildcards: `0x0013` matches `0x00,0x13`, while `0x13` does not. An implicit key's range-only match yields to an exact alternate-column hit by returning a miss with a `field` hint; explicit `field` selection stays authoritative
 - A `value` that misses names the other columns holding it, with their row counts, so `field` recovers a lookup by mnemonic or service name; a hit says when rows without a key cell hold the value too
-- Pages by `cursor` / `next_cursor` (pages after the first carry `offset`) within the effective `limit` (at most 100, default 25) and a 48,000-character records budget; a field over 2,000 characters is cut, a record keeps at most 16 fields, and `cut_fields` names what was cut
+- Pages whole records by `cursor` / `next_cursor` (pages after the first carry `offset`) within the effective `limit` (at most 100, default 25); field text and metadata lists are returned whole, preserving paragraph boundaries and artwork spacing
 - A registry with several sub-registries and none chosen returns `subregistries[]` instead of records; a table that nests tables lists them in `subregistries[]` on its first page, and a sub-registry read carries the registry's own notes and footnotes in `registry_notes[]`
 - Failures carry `unknown_registry`, `unknown_subregistry`, `unknown_field`, `non_xml_registry`, `invalid_cursor`, or `cursor_mismatch`
 
@@ -146,84 +149,63 @@ Agent-friendly output:
 
 - Misses are results, not errors: a lookup that finds nothing returns `found: false` with a `notice` naming the next step, an unknown RFC or draft returns `found: false` with `guidance`, and an invalid language tag returns `valid: false` with its `issues[]`. A miss means IANA has no registration, not that a value is unused in practice
 - Uniform lookup contract: every lookup takes exactly one mode key and fails `mode_required` otherwise; positive safe-integer `limit` values up to 1,000,000 clamp to 100 (default 25), or 50 for `iana_search_registries` (default 15). Clamped calls disclose `requested_limit` and `effective_limit` on both surfaces, including exact and empty modes. List modes (`keyword`, `organization`, `description`) page with `offset` and return `next_offset`, `totalCount`, `shown`, and `truncated`
+- List-mode `found` describes the full match set, even on an empty past-end page; port searches require a named service after transport filtering, and PEN organization searches require an assigned entry
 - Provenance on every registry response: `source` carries the registry file, `registry_updated`, `fetched_at`, and `stale`
 - Typed failures with recovery hints: every tool declares `upstream_unreadable` (`index_unreadable` for search) and `pacer_shed`, which carries `retryAfter` when this server's own request queue is full
 
 ## Getting started
 
-### Public Hosted Instance
-
-A public instance is available at `https://iana-registries.caseyjhand.com/mcp` — no installation required. Point any MCP client at it via Streamable HTTP:
-
-```json
-{
-  "mcpServers": {
-    "iana-registries-mcp-server": {
-      "type": "streamable-http",
-      "url": "https://iana-registries.caseyjhand.com/mcp"
-    }
-  }
-}
-```
-
-### Self-Hosted / Local
-
-Add the following to your MCP client configuration file.
-
-```json
-{
-  "mcpServers": {
-    "iana-registries-mcp-server": {
-      "type": "stdio",
-      "command": "bunx",
-      "args": ["@cyanheads/iana-registries-mcp-server@latest"],
-      "env": {
-        "MCP_TRANSPORT_TYPE": "stdio",
-        "MCP_LOG_LEVEL": "info"
-      }
-    }
-  }
-}
-```
-
-Or with npx (no Bun required):
-
-```json
-{
-  "mcpServers": {
-    "iana-registries-mcp-server": {
-      "type": "stdio",
-      "command": "npx",
-      "args": ["-y", "@cyanheads/iana-registries-mcp-server@latest"],
-      "env": {
-        "MCP_TRANSPORT_TYPE": "stdio",
-        "MCP_LOG_LEVEL": "info"
-      }
-    }
-  }
-}
-```
-
-Or with Docker:
-
-```json
-{
-  "mcpServers": {
-    "iana-registries-mcp-server": {
-      "type": "stdio",
-      "command": "docker",
-      "args": ["run", "-i", "--rm", "-e", "MCP_TRANSPORT_TYPE=stdio", "ghcr.io/cyanheads/iana-registries-mcp-server:latest"]
-    }
-  }
-}
-```
-
-For Streamable HTTP, set the transport and start the server:
+Connect to the hosted instance, no install:
 
 ```sh
-MCP_TRANSPORT_TYPE=http MCP_HTTP_PORT=3010 bunx @cyanheads/iana-registries-mcp-server@latest
-# Server listens at http://localhost:3010/mcp
+claude mcp add --transport http iana-registries-mcp-server https://iana-registries.caseyjhand.com/mcp
 ```
+
+Or run it locally:
+
+```sh
+claude mcp add iana-registries-mcp-server -- npx -y @cyanheads/iana-registries-mcp-server
+```
+
+For other clients, add this to the MCP config file:
+
+```json
+{
+  "mcpServers": {
+    "iana-registries-mcp-server": {
+      "command": "npx",
+      "args": ["-y", "@cyanheads/iana-registries-mcp-server"]
+    }
+  }
+}
+```
+
+No API key is required. For Docker or a source build, see [Running the server](#running-the-server).
+
+## Agent skill
+
+The [iana-registries-guide](./skills/iana-registries-guide/SKILL.md) chains registry assignments to their defining documents, current RFC relationships, and standards-series membership. It ships with plugin installs, npm, Docker, and the MCPB bundle, and is available over MCP to clients supporting the Skills extension.
+
+## Configuration
+
+The server reads no environment variables of its own. These framework settings apply:
+
+| Variable | Description | Default |
+|:---|:---|:---|
+| `MCP_TRANSPORT_TYPE` | Transport: `stdio` or `http`. | `stdio` |
+| `MCP_HTTP_PORT` | HTTP server port. | `3010` |
+| `MCP_HTTP_HOST` | HTTP server host. | `127.0.0.1` |
+| `MCP_HTTP_ENDPOINT_PATH` | HTTP endpoint path. | `/mcp` |
+| `MCP_SESSION_MODE` | HTTP session mode: `stateless`, `stateful`, or `auto`. | `stateless` |
+| `MCP_AUTH_MODE` | Authentication: `none`, `jwt`, or `oauth`. | `none` |
+| `MCP_LOG_LEVEL` | Log level (`debug`, `info`, `warning`, `error`, etc.). | `info` |
+| `LOGS_DIR` | Directory for log files (Node.js only). | `<app-root>/logs` |
+| `STORAGE_PROVIDER_TYPE` | Storage backend: `in-memory`, `filesystem`, `supabase`, `cloudflare-kv/r2/d1`. | `in-memory` |
+| `OTEL_ENABLED` | Enable [OpenTelemetry](https://github.com/cyanheads/mcp-ts-core/tree/main/docs/telemetry). | `false` |
+
+See [`.env.example`](./.env.example) for the full list of framework overrides.
+
+## Running the server
 
 ### Prerequisites
 
@@ -257,26 +239,29 @@ cp .env.example .env
 # the server needs no variables of its own; edit framework overrides as needed
 ```
 
-## Configuration
+### Docker and HTTP
 
-The server reads no environment variables of its own. These framework settings apply:
+Run the published image:
 
-| Variable | Description | Default |
-|:---|:---|:---|
-| `MCP_TRANSPORT_TYPE` | Transport: `stdio` or `http`. | `stdio` |
-| `MCP_HTTP_PORT` | HTTP server port. | `3010` |
-| `MCP_HTTP_HOST` | HTTP server host. | `127.0.0.1` |
-| `MCP_HTTP_ENDPOINT_PATH` | HTTP endpoint path. | `/mcp` |
-| `MCP_SESSION_MODE` | HTTP session mode: `stateless`, `stateful`, or `auto`. | `stateless` |
-| `MCP_AUTH_MODE` | Authentication: `none`, `jwt`, or `oauth`. | `none` |
-| `MCP_LOG_LEVEL` | Log level (`debug`, `info`, `warning`, `error`, etc.). | `info` |
-| `LOGS_DIR` | Directory for log files (Node.js only). | `<app-root>/logs` |
-| `STORAGE_PROVIDER_TYPE` | Storage backend: `in-memory`, `filesystem`, `supabase`, `cloudflare-kv/r2/d1`. | `in-memory` |
-| `OTEL_ENABLED` | Enable [OpenTelemetry](https://github.com/cyanheads/mcp-ts-core/tree/main/docs/telemetry). | `false` |
+```json
+{
+  "mcpServers": {
+    "iana-registries-mcp-server": {
+      "type": "stdio",
+      "command": "docker",
+      "args": ["run", "-i", "--rm", "-e", "MCP_TRANSPORT_TYPE=stdio", "ghcr.io/cyanheads/iana-registries-mcp-server:latest"]
+    }
+  }
+}
+```
 
-See [`.env.example`](./.env.example) for the full list of framework overrides.
+For Streamable HTTP, set the transport and start the server:
 
-## Running the server
+```sh
+MCP_TRANSPORT_TYPE=http MCP_HTTP_PORT=3010 bunx @cyanheads/iana-registries-mcp-server
+# Server listens at http://localhost:3010/mcp
+```
+
 
 ### Local development
 

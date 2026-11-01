@@ -1,0 +1,38 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "iana-registries-mcp-server",
+  "version": "0.2.1",
+  "description": "Look up IANA ports, media types, HTTP status codes and fields, URI schemes, enterprise numbers, and BCP 47 language tags; check RFC status; search and read any IANA registry via MCP. STDIO or Streamable HTTP.",
+  "author": {
+    "name": "cyanheads",
+    "email": "casey@caseyjhand.com",
+    "url": "https://github.com/cyanheads"
+  },
+  "homepage": "https://github.com/cyanheads/iana-registries-mcp-server#readme",
+  "repository": "https://github.com/cyanheads/iana-registries-mcp-server",
+  "license": "Apache-2.0",
+  "keywords": [
+    "mcp",
+    "mcp-server",
+    "model-context-protocol",
+    "typescript",
+    "stdio",
+    "streamable-http",
+    "iana",
+    "ietf",
+    "rfc",
+    "rfc-editor",
+    "datatracker",
+    "protocol-registries",
+    "port-numbers",
+    "media-types",
+    "mime-types",
+    "http-status-codes",
+    "http-fields",
+    "uri-schemes",
+    "private-enterprise-numbers",
+    "oid",
+    "bcp47",
+    "language-tags"
+  ]
+}

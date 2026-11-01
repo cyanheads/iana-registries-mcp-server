@@ -9,6 +9,7 @@ import {
   datesLine,
   inline,
   joinLines,
+  literal,
   quote,
   referenceLines,
   sourceLines,
@@ -215,6 +216,70 @@ describe('quote', () => {
     expect(lines.split('\n')).toHaveLength(200_001);
     expect(wide).toHaveLength(2_000_002);
     expect(performance.now() - started).toBeLessThan(2_000);
+  });
+});
+
+describe('literal', () => {
+  it('preserves indentation, tabs, paragraph breaks and raw Markdown as literal text', () => {
+    const text = '  | a |  b |\n\t| c |  d |\n\n> quoted\nnext\n![image](https://example.org/x)';
+    const fence = '```';
+    const block = `${fence}\n${text}\n${fence}`;
+    expect(literal(text)).toBe(block);
+    expect(joinLines(['**Description:**', literal(text), '**End:**'])).toBe(
+      `**Description:**\n${block}\n**End:**`,
+    );
+  });
+
+  it('uses a fence longer than embedded delimiters, including fences around raw quote lines', () => {
+    const text = '````\n> x\ny\n````````';
+    const fence = '`'.repeat(9);
+    expect(literal(text)).toBe(`${fence}\n${text}\n${fence}`);
+    expect(joinLines([literal(text)])).toBe(`${fence}\n${text}\n${fence}`);
+  });
+
+  it('keeps whitespace while stripping controls and bidi marks', () => {
+    expect(literal('  a\tb\r\nc\u0007\u202E')).toBe('```\n  a\tb\r\nc\n```');
+    expect(literal('')).toBe('```\n\n```');
+  });
+
+  it('keeps hostile fragments inside complete delimiters (fuzz)', () => {
+    for (const text of hostileStrings(500)) {
+      const block = literal(text);
+      const newline = block.indexOf('\n');
+      const fence = block.slice(0, newline);
+      const payload = block.slice(newline + 1, -(fence.length + 1));
+      expect(block.endsWith(`\n${fence}`)).toBe(true);
+      expect(payload).not.toContain(fence);
+      expect(joinLines([block])).toBe(block);
+      expect(payload.replace(/[\t\n\r]/g, '')).not.toMatch(CONTROL);
+    }
+  });
+});
+
+describe('literal scanner timing', () => {
+  it.each([
+    ['digits', (n: number) => '9'.repeat(n)],
+    ['delimiter run', (n: number) => '`'.repeat(n)],
+    ['overlapping prefixes', (n: number) => '`x'.repeat(n / 2)],
+    ['terminal line break', (n: number) => `${'§1 x'.repeat(n / 4)}\ny`],
+    ['line breaks throughout', (n: number) => '  \r\n'.repeat(n / 4)],
+  ])('bounds %s CPU across a 64-fold span', (_name, make) => {
+    let first = 0;
+    let last = 0;
+    for (let n = 5_000; n <= 320_000; n *= 2) {
+      const text = make(n);
+      joinLines([literal(text)]);
+      const start = process.threadCpuUsage();
+      for (let repeat = 0; repeat < 5; repeat++) {
+        const block = literal(text);
+        expect(joinLines([block])).toBe(block);
+      }
+      const cpu = process.threadCpuUsage(start);
+      last = cpu.user + cpu.system;
+      expect(last).toBeLessThan(500_000);
+      if (n === 5_000) first = last;
+    }
+    expect(last / Math.max(first, 1)).toBeLessThan(256);
   });
 });
 

@@ -297,20 +297,20 @@ describe('format(): blockquotes end before the next server line', () => {
     );
   });
 
-  it('separates the quoted registry notes from the notes cut line and the nested tables', () => {
+  it('separates literal registry notes from the optional cut marker and nested tables', () => {
     const text = render('iana_get_registry_records');
     expect(text).toContain(
-      '**Registry note (Formerly known as) [anchor 1]:**\n> First upstream line\n> second upstream line\n\n**Registry note:**',
+      '**Registry note (Formerly known as) [anchor 1]:**\n```\nFirst upstream line\nsecond upstream line\n```\n\n**Registry note:**',
     );
     expect(text).toContain(
-      '> second upstream line\n\n*Notes cut at the 4,000-character budget (notes_truncated: true).*',
+      'second upstream line\n```\n*Notes were truncated (notes_truncated: true).*',
     );
     expect(text).toContain('**Sub-registries (1):**\n- example-1-1 — Nested One (3 records)');
   });
 
-  it('separates the last quoted record field from the record dates', () => {
+  it('closes the last literal record field before the record dates', () => {
     expect(render('iana_get_registry_records')).toContain(
-      '> **notes:** First upstream line\n> second upstream line\n\n**Updated:** 2026-09-01',
+      '**notes:**\n```\nFirst upstream line\nsecond upstream line\n```\n**Updated:** 2026-09-01',
     );
   });
 });

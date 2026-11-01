@@ -33,14 +33,52 @@ const MAX_INPUT_IDS = 1_000;
 const REQUEST_LIMIT_MESSAGE = `Not resolved within this call's limit of ${DATATRACKER_CALL_REQUESTS} Datatracker requests. Call iana_get_rfc_status again with this id.`;
 
 /**
- * `ids` preprocess: one string splits on commas, semicolons, and newlines (a
- * bracketed string stays whole, so the framework's JSON-array repair reads it);
+ * `ids` preprocess: one string splits on commas, semicolons, and newlines;
+ * citation brackets and section qualifiers stay with their document;
  * items are trimmed, a URL loses its query and fragment, blanks are dropped,
  * so the schema validates every normalized item before any work is selected.
  */
 function splitIds(value: unknown): unknown {
-  const items =
-    typeof value === 'string' && !value.trim().startsWith('[') ? value.split(/[,;\n]/) : value;
+  let items = value;
+  if (typeof items === 'string') {
+    const text = items.trim();
+    if (text.startsWith('[')) {
+      try {
+        items = JSON.parse(text) as unknown;
+      } catch {
+        // A citation label is not a JSON array.
+      }
+    }
+    if (typeof items === 'string') {
+      const parts: string[] = [];
+      let start = 0;
+      let depth = 0;
+      let delimiter = '';
+      for (let i = 0; i <= text.length; i++) {
+        const char = text[i];
+        if (char === '[') depth++;
+        else if (char === ']' && depth > 0) depth--;
+        if (i !== text.length && (depth > 0 || (char !== ',' && char !== ';' && char !== '\n')))
+          continue;
+        const part = text.slice(start, i).trim();
+        const previous = parts.at(-1);
+        if (
+          delimiter === ',' &&
+          /^section\b/i.test(part) &&
+          previous !== undefined &&
+          previous.length <= 200 &&
+          classify(previous).kind !== 'unsupported'
+        ) {
+          parts[parts.length - 1] = `${previous}, ${part}`;
+        } else {
+          parts.push(part);
+        }
+        delimiter = char ?? '';
+        start = i + 1;
+      }
+      items = parts;
+    }
+  }
   if (!Array.isArray(items)) return items;
   return items
     .map((item: unknown) => (typeof item === 'string' ? withoutUrlTail(item.trim()) : item))
@@ -70,14 +108,17 @@ const RFC_ID = /^(?:rfc[\s-]?)?0*([1-9]\d{0,4})$/i;
 const RFC_FILE = new RegExp(String.raw`^rfc0*([1-9]\d{0,4})${EXTENSION}$`, 'i');
 
 /**
- * An RFC's URL on the RFC Editor (`/rfc/`, `/rfc/inline-errata/`, `/info/`),
+ * An RFC's URL on the RFC Editor (`/rfc/`, `/rfc/inline-errata/`, `/info/`, `/errata/`),
  * Datatracker (`/doc/`, `/doc/html/`), ietf.org (`/rfc/`), or tools.ietf.org
  * (`/html/`, `/rfc/`).
  */
 const RFC_URL = new RegExp(
-  String.raw`^(?:https?:\/\/)?(?:(?:www\.)?(?:rfc-editor\.org\/(?:rfc(?:\/inline-errata)?|info)|datatracker\.ietf\.org\/doc(?:\/html)?|ietf\.org\/rfc)|tools\.ietf\.org\/(?:html|rfc))\/rfc0*([1-9]\d{0,4})${EXTENSION}?${URL_END}`,
+  String.raw`^(?:https?:\/\/)?(?:(?:www\.)?(?:rfc-editor\.org\/(?:rfc(?:\/inline-errata)?|info|errata)|datatracker\.ietf\.org\/doc(?:\/html)?|ietf\.org\/rfc)|tools\.ietf\.org\/(?:html|rfc))\/rfc0*([1-9]\d{0,4})${EXTENSION}?${URL_END}`,
   'i',
 );
+
+/** An RFC DOI, bare, prefixed by `doi:`, or on doi.org. */
+const RFC_DOI = /^(?:doi:|https:\/\/doi\.org\/)?10\.17487\/rfc0*([1-9]\d{0,4})$/i;
 
 /** A draft name or file name: "draft-ietf-httpbis-semantics-19", "draft-ietf-httpbis-semantics-19.txt". */
 const DRAFT_NAME = new RegExp(`^(draft-[a-z0-9-]+?)${EXTENSION}?$`, 'i');
@@ -104,28 +145,46 @@ const SERIES_URL = new RegExp(
   'i',
 );
 
-type Requested =
+type Requested = (
   | { id: string; kind: 'rfc'; number: number }
   | { id: string; kind: 'draft'; name: string }
   | { id: string; kind: 'series'; name: string }
-  | { guidance: string; id: string; kind: 'unsupported' };
+  | { guidance: string; id: string; kind: 'unsupported' }
+) & { sections?: Set<string> };
 
 function classify(raw: string): Requested {
-  const rfc = RFC_ID.exec(raw) ?? RFC_FILE.exec(raw) ?? RFC_URL.exec(raw);
+  let citation = raw;
+  if (citation.startsWith('[') && citation.endsWith(']')) citation = citation.slice(1, -1).trim();
+  const section = /,\s*Section\s+(\d+(?:\.\d+)*)$/i.exec(citation);
+  if (section) citation = citation.slice(0, section.index).trim();
+  if (citation.startsWith('[') && citation.endsWith(']') && !raw.endsWith(']'))
+    citation = citation.slice(1, -1).trim();
+  const sectionNumber = section?.[1];
+  const metadata = sectionNumber ? { sections: new Set([sectionNumber]) } : {};
+  const rfc =
+    RFC_ID.exec(citation) ??
+    RFC_FILE.exec(citation) ??
+    RFC_URL.exec(citation) ??
+    RFC_DOI.exec(citation);
   if (rfc) {
     const number = Number(rfc[1]);
-    return { kind: 'rfc', id: `RFC ${number}`, number };
+    return { kind: 'rfc', id: `RFC ${number}`, number, ...metadata };
   }
-  const draft = DRAFT_NAME.exec(raw) ?? DRAFT_URL.exec(raw);
+  const draft = DRAFT_NAME.exec(citation.replace(/^I-D\./i, 'draft-')) ?? DRAFT_URL.exec(citation);
   if (draft) {
     const name = `${draft[1]}${draft[2] ? `-${draft[2]}` : ''}`.toLowerCase();
-    return { kind: 'draft', id: name, name };
+    return { kind: 'draft', id: name, name, ...metadata };
   }
-  const series = SERIES.exec(raw) ?? SERIES_URL.exec(raw);
+  const series = SERIES.exec(citation) ?? SERIES_URL.exec(citation);
   if (series) {
     const prefix = `${series[1]}`.toLowerCase();
     const number = Number(series[2]);
-    return { kind: 'series', id: `${prefix.toUpperCase()} ${number}`, name: `${prefix}${number}` };
+    return {
+      kind: 'series',
+      id: `${prefix.toUpperCase()} ${number}`,
+      name: `${prefix}${number}`,
+      ...metadata,
+    };
   }
   return {
     kind: 'unsupported',
@@ -474,7 +533,7 @@ export const getRfcStatus = tool('iana_get_rfc_status', {
               .string()
               .max(200)
               .describe(
-                'One RFC number ("RFC 9110", "9110"), draft name, series number ("BCP 14"), RFC or draft file name, or a URL of a form the tool description lists. A URL\'s query and fragment are dropped before this 200-character limit applies.',
+                'One RFC number ("RFC 9110", "9110"), draft name (also I-D.<name>), series number ("BCP 14"), RFC or draft file name, RFC DOI (bare, doi:, or https://doi.org/), RFC Editor errata URL, or a URL of a form the tool description lists. Balanced citation brackets and a trailing ", Section 15.5.5" are accepted; sections are ignored with a notice because only document status is returned. A URL\'s query and fragment are dropped before this 200-character limit applies.',
               ),
           )
           .min(1)
@@ -576,7 +635,7 @@ export const getRfcStatus = tool('iana_get_rfc_status', {
       .string()
       .optional()
       .describe(
-        "Set when ids were left unresolved at the call's Datatracker request limit, or when Datatracker fields (stream and group, or series membership) were unavailable for some RFCs.",
+        "Set when selected document citations carried ignored section qualifiers, ids were left unresolved at the call's Datatracker request limit, or Datatracker fields (stream and group, or series membership) were unavailable for some RFCs.",
       ),
   },
   errors: [
@@ -608,11 +667,18 @@ export const getRfcStatus = tool('iana_get_rfc_status', {
 
   async handler(input, ctx) {
     const budget = startCallBudget(ctx, { datatracker: DATATRACKER_CALL_REQUESTS });
-    const seen = new Set<string>();
+    const seen = new Map<string, Requested>();
     const distinct = input.ids.map(classify).filter((requested) => {
       const key = `${requested.kind}:${requested.id.toLowerCase()}`;
-      if (seen.has(key)) return false;
-      seen.add(key);
+      const previous = seen.get(key);
+      if (previous) {
+        for (const section of requested.sections ?? []) {
+          previous.sections ??= new Set();
+          previous.sections.add(section);
+        }
+        return false;
+      }
+      seen.set(key, requested);
       return true;
     });
     const requests = distinct.slice(input.ids_offset, input.ids_offset + MAX_IDS);
@@ -705,6 +771,12 @@ export const getRfcStatus = tool('iana_get_rfc_status', {
         `Stream and working group were unavailable for ${trackingUnavailable.join(', ')}; status and relations come from the RFC Editor.`,
       seriesUnavailable.length > 0 &&
         `Series membership was unavailable for ${seriesUnavailable.join(', ')}, so is_also is left out; status and relations still answered.`,
+      ...requests.flatMap((requested) =>
+        [...(requested.sections ?? [])].map(
+          (section) =>
+            `Section ${section} of ${requested.id} was ignored; this tool returns document-level status.`,
+        ),
+      ),
     ].filter(Boolean);
     if (notice.length > 0) ctx.enrich.notice(notice.join(' '));
     return { documents, failed, ...continuation };

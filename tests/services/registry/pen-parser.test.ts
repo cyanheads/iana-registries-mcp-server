@@ -22,6 +22,21 @@ function catching(fn: () => unknown): unknown {
 }
 
 describe('parsePen', () => {
+  it.each([
+    ['unassigned', 'unassigned'],
+    ['RESERVED', 'reserved'],
+    ['---NoNe---', 'unassigned'],
+  ])('classifies whole %s markers without changing text', (organization, state) => {
+    expect(parse(penText([penRecord(9, organization)])).byNumber.get(9)).toMatchObject({
+      organization,
+      state,
+    });
+  });
+  it('keeps marker words embedded in organization names assigned', () => {
+    expect(parse(penText([penRecord(9, 'Reserved Networks')])).byNumber.get(9)?.state).toBe(
+      'assigned',
+    );
+  });
   const pen = parse(PEN_TEXT);
 
   it('reads the update date, the highest number and one entry per record in ascending order', () => {

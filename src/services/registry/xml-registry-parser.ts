@@ -2,7 +2,7 @@
  * @fileoverview Parses one IANA registry XML file into the generic model:
  * registry and sub-registry tables, records keyed by element name, notes,
  * registration ranges, descriptions, file pointers, and normalized references.
- * Mixed content is flattened; person data (`<people>`, `<expert>`, `<assignee>`,
+ * Mixed content keeps paragraph boundaries and literal artwork; person data (`<people>`, `<expert>`, `<assignee>`,
  * `<contact>`, person xrefs at any depth) is dropped by structure and never
  * parsed into the model.
  * @module services/registry/xml-registry-parser
@@ -34,7 +34,7 @@ const ASSIGNMENTS = 'https://www.iana.org/assignments/';
 const DROPPED = new Set(['people', 'expert', 'assignee', 'contact']);
 
 /** Block-level mixed-content elements, rendered on their own lines. */
-const BLOCKS = new Set(['paragraph', 't', 'artwork', 'list', 'li']);
+const BLOCKS = new Set(['list', 'li']);
 
 /**
  * `htmlEntities` turns on numeric character references (`&#233;` → `é`); the five
@@ -82,7 +82,10 @@ function cleanText(raw: string): string {
     .join('\n');
 }
 
-function collect(nodes: readonly XNode[], out: string[]): void {
+/** Prose fragments, literal artwork, and paragraph boundaries. */
+type TextPiece = string | { literal: string } | null;
+
+function collect(nodes: readonly XNode[], out: TextPiece[]): void {
   for (const node of nodes) {
     const tag = tagOf(node);
     if (tag === undefined || DROPPED.has(tag)) continue;
@@ -98,6 +101,22 @@ function collect(nodes: readonly XNode[], out: string[]): void {
     }
     if (tag === 'br') {
       out.push('\n');
+      continue;
+    }
+    if (tag === 'artwork') {
+      const artwork: TextPiece[] = [];
+      collect(childrenOf(node, tag), artwork);
+      out.push({
+        literal: artwork
+          .map((part) => (typeof part === 'string' ? part : (part?.literal ?? '\n\n')))
+          .join(''),
+      });
+      continue;
+    }
+    if (tag === 'paragraph' || tag === 't') {
+      out.push(null);
+      collect(childrenOf(node, tag), out);
+      out.push(null);
       continue;
     }
     const block = BLOCKS.has(tag);
@@ -117,9 +136,24 @@ function flatten(nodes: readonly XNode[]): string {
 
 /** {@link flatten} without the email scrub — only for a record's key column. */
 function flattenRaw(nodes: readonly XNode[]): string {
-  const out: string[] = [];
+  const out: TextPiece[] = [];
   collect(nodes, out);
-  return cleanText(out.join(''));
+  const blocks: string[] = [];
+  let prose: string[] = [];
+  const flush = () => {
+    const text = cleanText(prose.join(''));
+    if (text) blocks.push(text);
+    prose = [];
+  };
+  for (const part of out) {
+    if (typeof part === 'string') prose.push(part);
+    else {
+      flush();
+      if (part?.literal) blocks.push(part.literal);
+    }
+  }
+  flush();
+  return blocks.join('\n\n');
 }
 
 /** Inline xref text: the label (plus the target when the label hides it), else the id. */

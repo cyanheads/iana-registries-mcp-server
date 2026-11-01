@@ -1,17 +1,14 @@
 /**
  * @fileoverview Tests for `extractTemplateStatements`: the three labels (plain,
  * numbered, spaced before the colon), the extent rule (a blank line, another
- * label line, or 300 characters), the line filter (email-shaped tokens in the
+ * label line), the line filter (email-shaped tokens in the
  * `@`, `mailto:` and `&` forms, and contact-word openers), and the three
  * template layouts the design names. Every person and address in a fixture is
  * invented.
  */
 
 import { describe, expect, it } from 'vitest';
-import {
-  extractTemplateStatements,
-  STATEMENT_MAX_CHARS,
-} from '@/services/media-template/template-statements.js';
+import { extractTemplateStatements } from '@/services/media-template/template-statements.js';
 import {
   TEMPLATE_BARE,
   TEMPLATE_HOSTILE,
@@ -170,24 +167,23 @@ describe('extractTemplateStatements: extent', () => {
     });
   });
 
-  it('cuts a statement at 300 characters, and keeps exactly 300', () => {
-    expect(STATEMENT_MAX_CHARS).toBe(300);
+  it('retains complete statements beyond the former character boundary', () => {
     expect(extract(`File extension(s): ${'x'.repeat(300)}`).fileExtensions).toBe('x'.repeat(300));
-    expect(extract(`File extension(s): ${'x'.repeat(301)}`).fileExtensions).toBe('x'.repeat(300));
-    expect(extract(`File extension(s): ${'x'.repeat(5_000)}`).fileExtensions).toHaveLength(300);
+    expect(extract(`File extension(s): ${'x'.repeat(301)}`).fileExtensions).toBe('x'.repeat(301));
+    expect(extract(`File extension(s): ${'x'.repeat(5_000)}`).fileExtensions).toHaveLength(5_000);
   });
 
-  it('counts the 300 characters across continuation lines, newlines included', () => {
+  it('keeps complete continuation lines', () => {
     const text = `Intended usage: ${'a'.repeat(250)}\n   ${'b'.repeat(100)}`;
     const statement = extract(text).intendedUsage ?? '';
-    expect(statement).toBe(`${'a'.repeat(250)}\n${'b'.repeat(49)}`);
-    expect(statement).toHaveLength(300);
+    expect(statement).toBe(`${'a'.repeat(250)}\n${'b'.repeat(100)}`);
+    expect(statement).toHaveLength(351);
   });
 
-  it('counts characters, not UTF-16 units', () => {
+  it('keeps every Unicode code point', () => {
     const statement = extract(`File extension(s): ${'😀'.repeat(310)}`).fileExtensions ?? '';
-    expect(Array.from(statement)).toHaveLength(300);
-    expect(statement).toBe('😀'.repeat(300));
+    expect(Array.from(statement)).toHaveLength(310);
+    expect(statement).toBe('😀'.repeat(310));
   });
 
   it('reads CRLF, bare CR and LF line endings alike', () => {
@@ -266,10 +262,10 @@ describe('extractTemplateStatements: line filter', () => {
     expect(extract(text)).toEqual({ intendedUsage: 'COMMON' });
   });
 
-  it('filters lines before the 300-character cut, so a dropped label line cannot use up the budget', () => {
+  it('filters contact lines while preserving the whole remaining statement', () => {
     expect(extract(`File extension(s): .a, ask person&example.org\n   ${'y'.repeat(400)}`)).toEqual(
       {
-        fileExtensions: 'y'.repeat(300),
+        fileExtensions: 'y'.repeat(400),
       },
     );
   });

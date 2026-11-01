@@ -10,11 +10,14 @@
  * person and address in a fixture is invented.
  */
 
+import { z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { lookupPen } from '@/mcp-server/tools/definitions/lookup-pen.tool.js';
-import { PEN_URL } from '@/services/registry/registry-store.js';
+import { searchRegistries } from '@/mcp-server/tools/definitions/search-registries.tool.js';
+import { PEN_URL, PROTOCOL_INDEX_URL } from '@/services/registry/registry-store.js';
 import { PEN_TEXT, penRecord, penText } from '../fixtures/pen.js';
+import { searchIndexHtml } from '../fixtures/search-index.js';
 import { describeFailureContract } from '../shared/failure-contract.js';
 import { missingFromText } from '../shared/format-parity.js';
 import { callTool, setupTools } from '../shared/tool-harness.js';
@@ -213,6 +216,112 @@ describe('iana_lookup_pen: number input', () => {
 });
 
 describe('iana_lookup_pen: OID input', () => {
+  it.each([
+    'iso.3.6.1.4.1.32473.01.2',
+    'SNMPv2-SMI::enterprises.32473.01.2',
+    'enterprises.32473.01.2',
+  ])('accepts SNMP spelling %s on both surfaces', async (pen) => {
+    boot();
+    const out = await call({ pen });
+    expect(out.structured).toMatchObject({
+      found: true,
+      requested_oid: '1.3.6.1.4.1.32473.01.2',
+      sub_arcs: '01.2',
+    });
+    expect(out.text).toContain('1.3.6.1.4.1.32473.01.2');
+  });
+  it.each([
+    ['1.3.6.1.2.1.1.1.0', 'outside_enterprise_arc'],
+    ['1.3.6.1.4.1', 'enterprise_number_required'],
+  ])('routes %s before fetching', async (pen, reason) => {
+    const s = boot();
+    const out = await call({ pen });
+    expect(out.structured.error).toMatchObject({
+      data: { reason, recovery: { hint: expect.stringContaining('iana_search_registries') } },
+    });
+    expect(out.text).toContain('iana_search_registries');
+    expect(s.fetches()).toBe(0);
+  });
+  it('advertises accepted raw case, whitespace, blank and leading-dot forms', () => {
+    const schema = z.toJSONSchema(lookupPen.input, { io: 'input' });
+    const penSchema = schema.properties?.pen;
+    if (!penSchema || typeof penSchema === 'boolean' || typeof penSchema.pattern !== 'string')
+      throw new Error('PEN input schema must advertise a pattern.');
+    const pattern = new RegExp(penSchema.pattern);
+    for (const pen of [
+      '',
+      '  ',
+      ' .ISO.ORG.DOD.INTERNET.PRIVATE.ENTERPRISES.32473 ',
+      ' .SNMPv2-SMI::ENTERPRISES.32473.1 ',
+      '.iso.3.6.1.4.1.32473',
+      '.32473',
+    ])
+      expect(pattern.test(pen)).toBe(true);
+  });
+  it('PEN input timing stays bounded across long raw inputs', () => {
+    const schema = z.toJSONSchema(lookupPen.input, { io: 'input' });
+    const penSchema = schema.properties?.pen;
+    if (!penSchema || typeof penSchema === 'boolean' || typeof penSchema.pattern !== 'string')
+      throw new Error('PEN input schema must advertise a pattern.');
+    const pattern = new RegExp(penSchema.pattern);
+    const shapes = [
+      (n: number) => '9'.repeat(n),
+      (n: number) => 'iso.'.repeat(Math.ceil(n / 4)),
+      (n: number) => `${'§1 x'.repeat(Math.ceil(n / 4))}\ny`,
+      (n: number) => `${'  \r\n'.repeat(Math.ceil(n / 4))}x`,
+      (n: number) => `${' '.repeat(n)}x`,
+    ];
+    for (const shape of shapes) {
+      let firstCpu = 0;
+      for (let size = 5_000; size <= 320_000; size *= 2) {
+        const input = shape(size);
+        for (let i = 0; i < 20; i++) pattern.test(input);
+        const before = process.threadCpuUsage();
+        for (let i = 0; i < 100; i++) {
+          expect(pattern.test(input)).toBe(false);
+          expect(lookupPen.input.shape.pen.safeParse(input).success).toBe(false);
+        }
+        const used = process.threadCpuUsage(before);
+        const cpu = used.user + used.system;
+        expect(cpu).toBeLessThan(1_000_000);
+        if (size === 5_000) firstCpu = cpu;
+        if (size === 320_000) expect(cpu / Math.max(firstCpu, 1)).toBeLessThan(256);
+      }
+    }
+  });
+  it('keeps malformed syntax recovery readable without exposing a regex', async () => {
+    const s = boot();
+    const out = await call({ pen: 'enterprises..9' });
+    expect(out.structured.error).toMatchObject({
+      data: {
+        reason: 'invalid_arguments',
+        recovery: { hint: expect.stringContaining('Pass a PEN') },
+      },
+    });
+    expect(JSON.stringify(out.structured)).not.toContain('pattern');
+    expect(out.text).not.toContain('pattern');
+    expect(s.fetches()).toBe(0);
+  });
+  it('follows outside-arc recovery to SMI registry discovery', async () => {
+    const s = boot();
+    const rejected = await call({ pen: '1.3.6.1.2.1.1.1.0' });
+    expect(rejected.text).toContain('query "smi"');
+    s.serve({
+      [PROTOCOL_INDEX_URL]: () =>
+        htmlResponse(
+          searchIndexHtml([
+            {
+              href: '/assignments/smi-numbers',
+              title: 'SMI Network Management Private Enterprise Codes',
+            },
+          ]),
+        ),
+    });
+    const recovered = await callTool(searchRegistries, { query: 'smi' });
+    expect(recovered.structured).toMatchObject({ registries: [{ registry_id: 'smi-numbers' }] });
+    expect(recovered.text).toContain('smi-numbers');
+    expect(s.fetched()).toEqual([PROTOCOL_INDEX_URL]);
+  });
   it('accepts the bare numeric OID of the enterprise without echoing arcs', async () => {
     boot();
     const out = await call({ pen: '1.3.6.1.4.1.32473' });
@@ -310,6 +419,26 @@ describe('iana_lookup_pen: OID input', () => {
 });
 
 describe('iana_lookup_pen: organization search', () => {
+  it('keeps found true after the final organization page', async () => {
+    boot();
+    const out = await call({ organization: 'example', offset: 3 });
+    expect(out.structured).toMatchObject({ found: true, enterprises: [], totalCount: 3 });
+    expect(out.text).toContain('**Found:** true');
+  });
+  it('returns lowercase markers as unassigned on both surfaces', async () => {
+    boot(penText([penRecord(8653, 'unassigned')]));
+    const out = await call({ pen: '8653' });
+    expect(out.structured).toMatchObject({
+      found: false,
+      enterprises: [{ organization: 'unassigned', state: 'unassigned' }],
+    });
+    expect(out.text).toContain('**State:** unassigned');
+    expect(out.text).toContain('no organization holds it');
+    expect((await call({ organization: 'unassigned' })).structured).toMatchObject({
+      found: false,
+      totalCount: 0,
+    });
+  });
   it('matches whole tokens of the organization line, in number order', async () => {
     boot();
     const out = await call({ organization: 'example' });
@@ -526,8 +655,6 @@ describe('iana_lookup_pen: input validation', () => {
     ['a negative pen', { pen: '-1' }],
     ['a fractional pen', { pen: '1.5' }],
     ['a pen over 9 digits', { pen: '1234567890' }],
-    ['an OID outside the enterprise arc', { pen: '1.3.6.1.4.2.1' }],
-    ['the enterprise arc without a number', { pen: '1.3.6.1.4.1' }],
     ['the enterprise arc with a trailing dot', { pen: '1.3.6.1.4.1.' }],
     ['an OID with a trailing dot', { pen: '1.3.6.1.4.1.32473.' }],
     ['an OID with an empty arc', { pen: '1.3.6.1.4.1.32473..2' }],

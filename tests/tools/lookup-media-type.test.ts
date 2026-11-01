@@ -426,6 +426,22 @@ describe('iana_lookup_media_type: status annotations and replacements', () => {
 });
 
 describe('iana_lookup_media_type: registration template', () => {
+  it('returns long multiline statements whole after contact filtering on both surfaces', async () => {
+    const s = boot();
+    const first = 'x'.repeat(301);
+    const continuation = `and ${'y'.repeat(350)}`;
+    s.serve({
+      [tmpl('application/json')]: () =>
+        textResponse(
+          `Intended usage: ${first}\n${continuation}\nContact: Private Person\nprivate@example.org\nFile extension: .json\n`,
+        ),
+    });
+    const out = await call({ type: 'application/json' });
+    expect(rows(out)[0]?.template?.intended_usage).toBe(`${first}\n${continuation}`);
+    expect(out.text).toContain(`**Intended usage:**\n> ${first}\n> ${continuation}`);
+    expect(`${out.text}\n${JSON.stringify(out.structured)}`).not.toContain('Private Person');
+    expect(`${out.text}\n${JSON.stringify(out.structured)}`).not.toContain('private@example.org');
+  });
   it('reads each of the three layouts', async () => {
     boot();
     const labelled = rows(await call({ type: 'application/json' }))[0]?.template;

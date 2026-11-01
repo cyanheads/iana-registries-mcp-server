@@ -1,6 +1,6 @@
 # iana-registries-mcp-server - Directory Structure
 
-Generated on: 2026-10-17 22:31:15
+Generated on: 2026-11-01 03:41:14
 
 ```text
 iana-registries-mcp-server/
@@ -37,6 +37,8 @@ iana-registries-mcp-server/
 │   ├── add-resource/
 │   │   └── SKILL.md
 │   ├── add-service/
+│   │   └── SKILL.md
+│   ├── add-skill/
 │   │   └── SKILL.md
 │   ├── add-test/
 │   │   └── SKILL.md
@@ -134,6 +136,9 @@ iana-registries-mcp-server/
 │   ├── prune-musl-packages.ts
 │   ├── release-github.ts
 │   └── tree.ts
+├── skills/
+│   └── iana-registries-guide/
+│       └── SKILL.md
 ├── src/
 │   ├── mcp-server/
 │   │   └── tools/
@@ -172,6 +177,7 @@ iana-registries-mcp-server/
 │   │   │   ├── registry-tables.ts
 │   │   │   ├── search-text.ts
 │   │   │   ├── types.ts
+│   │   │   ├── value-matcher.ts
 │   │   │   └── xml-registry-parser.ts
 │   │   └── upstream/
 │   │       ├── call-budget.ts
@@ -191,6 +197,8 @@ iana-registries-mcp-server/
 │   │   ├── records-xml.ts
 │   │   ├── registry-xml.ts
 │   │   └── search-index.ts
+│   ├── scripts/
+│   │   └── bundle-selectors.test.ts
 │   ├── services/
 │   │   ├── ietf/
 │   │   │   └── ietf-doc-service.test.ts
@@ -207,6 +215,7 @@ iana-registries-mcp-server/
 │   │   │   ├── protocol-index-parser.test.ts
 │   │   │   ├── registry-store.test.ts
 │   │   │   ├── search-text.test.ts
+│   │   │   ├── value-matcher.test.ts
 │   │   │   └── xml-registry-parser.test.ts
 │   │   └── upstream/
 │   │       ├── call-budget.test.ts
@@ -249,7 +258,9 @@ iana-registries-mcp-server/
 ├── Dockerfile
 ├── LICENSE
 ├── manifest.json
+├── mcp.json
 ├── package.json
+├── plugin.json
 ├── README.md
 ├── server.json
 ├── tsconfig.build.json

@@ -69,6 +69,24 @@ const brief = (out: Out) =>
   );
 
 describe('iana_lookup_port: port mode', () => {
+  it('bases keyword found on all filtered matches including after the page ends', async () => {
+    boot(
+      portsXml(
+        [
+          portRecord({ number: '1', description: 'Example' }),
+          portRecord({ number: '2', name: 'example', protocol: 'tcp', description: 'Example' }),
+        ].join(''),
+      ),
+    );
+    for (const offset of [0, 1, 2]) {
+      const out = await call({ keyword: 'example', limit: 1, offset });
+      expect(out.structured).toMatchObject({ found: true, totalCount: 2 });
+      expect(out.text).toContain('**Found:** true');
+    }
+    const filtered = await call({ keyword: 'example', transport: 'udp', offset: 10 });
+    expect(filtered.structured).toMatchObject({ found: false, totalCount: 1 });
+    expect(filtered.text).toContain('**Found:** false');
+  });
   it('returns every transport for the port, with its class, references and counters', async () => {
     boot();
     const out = await call({ port: 22 });
@@ -568,7 +586,7 @@ describe('iana_lookup_port: keyword mode', () => {
     expect(out.isError).toBe(false);
     expect(out.structured).toMatchObject({
       mode: 'keyword',
-      found: false,
+      found: true,
       assignments: [],
       totalCount: 4,
       shown: 0,

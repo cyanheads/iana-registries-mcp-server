@@ -38,6 +38,24 @@ const only = (xml: string) => {
 };
 
 describe('registry shell', () => {
+  it('preserves artwork spacing and paragraph boundaries in mixed field text', () => {
+    const xml = withRecord(
+      '<value>1</value><description><paragraph>First paragraph.</paragraph><paragraph>Second paragraph.</paragraph><artwork>  | bit | name    |\n\t| 0   | value   |\n\n  end</artwork><paragraph>After artwork.</paragraph></description>',
+    );
+    expect(only(xml).fields.description).toBe(
+      'First paragraph.\n\nSecond paragraph.\n\n  | bit | name    |\n\t| 0   | value   |\n\n  end\n\nAfter artwork.',
+    );
+  });
+
+  it('keeps artwork at either edge and removes nested person data', () => {
+    const xml = withRecord(
+      '<value>1</value><description><artwork>  first\n    second</artwork><paragraph>Text <contact>Private Contact</contact><xref type="person" data="private"/> stays.</paragraph><artwork>\tlast  column</artwork></description>',
+    );
+    expect(only(xml).fields.description).toBe(
+      '  first\n    second\n\nText stays.\n\n\tlast  column',
+    );
+  });
+
   it('reads id, title, category, updated and the root rule and references', () => {
     const model = parse(NESTED_XML);
     expect(model).toMatchObject({
@@ -141,7 +159,7 @@ describe('notes, footnotes and ranges', () => {
       {
         anchor: 'alpha-1',
         title: 'NOTE',
-        text: 'First line\nsecond line\nA paragraph\nAnother paragraph',
+        text: 'First line\nsecond line\n\nA paragraph\n\nAnother paragraph',
       },
     ]);
   });
@@ -343,7 +361,7 @@ describe('mixed content', () => {
       description(
         '<paragraph>p1</paragraph><list><li>a</li><li>b</li></list><artwork>art</artwork>',
       ),
-    ).toBe('p1\na\nb\nart');
+    ).toBe('p1\n\na\nb\n\nart');
   });
 
   it('decodes numeric character references once, leaving an escaped ampersand reference as text', () => {

@@ -161,7 +161,11 @@ export const lookupPort = tool('iana_lookup_port', {
   }),
   output: z.object({
     mode: z.enum(['port', 'service', 'keyword']).describe('Which lookup ran.'),
-    found: z.boolean().describe('True when a returned row has a registered service name.'),
+    found: z
+      .boolean()
+      .describe(
+        'True when a matching row after transport filtering has a registered service name; keyword mode checks all matches before paging.',
+      ),
     port_class: z
       .object({
         name: z.enum(['system', 'user', 'dynamic']).describe('RFC 6335 port class.'),
@@ -360,7 +364,7 @@ export const lookupPort = tool('iana_lookup_port', {
     });
     return {
       mode: 'keyword' as const,
-      found: assignments.some((row) => row.service_name !== undefined),
+      found: rows.some((row) => row.service_name !== undefined),
       assignments,
       source: loaded.source,
     };

@@ -33,11 +33,44 @@ import {
 /** The private enterprise arc; enterprise N's OID is this plus `N`. */
 const ENTERPRISE_ARC = '1.3.6.1.4.1';
 
-/** The symbolic form of {@link ENTERPRISE_ARC} (`enterprises` is the SNMPv2-SMI spelling). */
-const SYMBOLIC_ARC = /^iso\.org\.dod\.internet\.private\.enterprises?\./i;
+const SYMBOLIC_PREFIXES = [
+  'iso.org.dod.internet.private.enterprises',
+  'iso.org.dod.internet.private.enterprise',
+  'snmpv2-smi::enterprises',
+  'enterprises',
+  'iso.3.6.1.4.1',
+] as const;
+// JSON Schema carries no regex flags, so spell case folding in the pattern itself.
+const SYMBOLIC_PATTERN = SYMBOLIC_PREFIXES.map((prefix) =>
+  [...prefix]
+    .map((letter) =>
+      /[a-z]/.test(letter) ? `[${letter}${letter.toUpperCase()}]` : letter === '.' ? '\\.' : letter,
+    )
+    .join(''),
+).join('|');
+const RAW_PEN_PATTERN = new RegExp(
+  `^(?:\\s*|\\s*\\.?(?:\\d{1,9}|\\d{1,10}(?:\\.\\d{1,10}){2,70}|(?:${SYMBOLIC_PATTERN})(?:\\.\\d{1,9}(?:\\.\\d{1,10}){0,64})?)\\s*)$`,
+);
+const PEN_SYNTAX_HINT =
+  'Pass a PEN of 1–9 digits or a numeric enterprise OID under 1.3.6.1.4.1, with at most 64 sub-arcs of 1–10 digits. Symbolic prefixes iso.3.6.1.4.1, iso.org.dod.internet.private.enterprise(s), enterprises, and SNMPv2-SMI::enterprises are accepted.';
 
-/** A bare number, or a numeric OID under the enterprise arc with optional arcs below N. */
-const PEN_PATTERN = /^(?:\d{1,9}|1\.3\.6\.1\.4\.1\.\d{1,9}(?:\.\d{1,10}){0,64})$/;
+function normalizePen(raw: string): string {
+  const text = raw.startsWith('.') ? raw.slice(1) : raw;
+  const lower = text.toLowerCase();
+  for (const prefix of SYMBOLIC_PREFIXES) {
+    if (lower === prefix || lower.startsWith(`${prefix}.`))
+      return `${ENTERPRISE_ARC}${text.slice(prefix.length)}`;
+  }
+  return text;
+}
+
+function validPen(raw: string): boolean {
+  if (!RAW_PEN_PATTERN.test(raw)) return false;
+  const normalized = normalizePen(raw.trim());
+  if (!normalized.startsWith(`${ENTERPRISE_ARC}.`)) return true;
+  const arcs = normalized.slice(ENTERPRISE_ARC.length + 1).split('.');
+  return (arcs[0]?.length ?? 0) <= 9 && arcs.length <= 65;
+}
 
 function toEnterprise(entry: PenEntry) {
   return {
@@ -55,11 +88,12 @@ export const lookupPen = tool('iana_lookup_pen', {
     'Look up a Private Enterprise Number (PEN). Pass exactly one of `pen` (a number such as 32473, or an OID under 1.3.6.1.4.1 such as 1.3.6.1.4.1.32473.1.2) or `organization` (words matched against organization names). Returns the organization and its OID prefix. Arcs below the enterprise number are assigned by the enterprise, not IANA. Contact details are not returned.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
-    pen: blankAsUnset(z.string().regex(PEN_PATTERN).optional(), (trimmed) =>
-      trimmed.replace(/^\./, '').replace(SYMBOLIC_ARC, `${ENTERPRISE_ARC}.`),
-    ).describe(
-      'Enterprise number, e.g. "32473", or an OID under 1.3.6.1.4.1 naming it, e.g. "1.3.6.1.4.1.32473.1.2" (a leading dot and the iso.org.dod.internet.private.enterprise prefix are accepted). Pass this or organization, not both.',
-    ),
+    // Refinement gives readable syntax errors; metadata advertises the same raw grammar.
+    pen: blankAsUnset(z.string().refine(validPen, PEN_SYNTAX_HINT).optional())
+      .meta({ pattern: RAW_PEN_PATTERN.source })
+      .describe(
+        'Enterprise number, e.g. "32473", or an OID under 1.3.6.1.4.1 naming it, e.g. "1.3.6.1.4.1.32473.1.2". A leading dot, case-insensitive iso.3.6.1.4.1, iso.org.dod.internet.private.enterprise(s), enterprises, and SNMPv2-SMI::enterprises prefixes are accepted. Pass this or organization, not both.',
+      ),
     organization: blankAsUnset(searchWords().optional()).describe(
       'Words matched as whole tokens against the names of assigned entries, e.g. "cisco systems"; look up a number with pen to see a reserved or unassigned one. Pass this or pen, not both.',
     ),
@@ -68,7 +102,11 @@ export const lookupPen = tool('iana_lookup_pen', {
   }),
   output: z.object({
     mode: z.enum(['pen', 'organization']).describe('Which lookup ran.'),
-    found: z.boolean().describe('True when a returned number is assigned to an organization.'),
+    found: z
+      .boolean()
+      .describe(
+        'True when the number is assigned, or any assigned organization matches before paging.',
+      ),
     requested_oid: z
       .string()
       .optional()
@@ -94,7 +132,7 @@ export const lookupPen = tool('iana_lookup_pen', {
             state: z
               .enum(['assigned', 'reserved', 'unassigned'])
               .describe(
-                'reserved ("Reserved"), unassigned ("Unassigned" or "---none---"), else assigned.',
+                'reserved ("Reserved"), unassigned ("Unassigned" or "---none---"), matched as whole markers case-insensitively; else assigned.',
               ),
           })
           .describe('One enterprise number entry.'),
@@ -104,6 +142,22 @@ export const lookupPen = tool('iana_lookup_pen', {
   }),
   enrichment: offsetListEnrichment,
   errors: [
+    {
+      reason: 'outside_enterprise_arc',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'The numeric OID is outside the private enterprise arc 1.3.6.1.4.1.',
+      recovery:
+        'Pass an enterprise OID under 1.3.6.1.4.1 or call iana_search_registries with query "smi" to find the SMI registries.',
+      severity: 'notice',
+    },
+    {
+      reason: 'enterprise_number_required',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'The OID names the enterprise arc itself without an enterprise number.',
+      recovery:
+        'Append the enterprise number to 1.3.6.1.4.1, or call iana_search_registries with query "smi" to find the SMI registries.',
+      severity: 'notice',
+    },
     {
       reason: 'mode_required',
       code: JsonRpcErrorCode.ValidationError,
@@ -133,6 +187,19 @@ export const lookupPen = tool('iana_lookup_pen', {
     input = { ...input, limit: initializeList(ctx.enrich, input.limit, 100) };
     if ((input.pen === undefined) === (input.organization === undefined)) {
       throw ctx.fail('mode_required', 'Pass exactly one of pen or organization.');
+    }
+    if (input.pen !== undefined) {
+      input = { ...input, pen: normalizePen(input.pen) };
+      if (input.pen === ENTERPRISE_ARC)
+        throw ctx.fail(
+          'enterprise_number_required',
+          'The enterprise arc needs an enterprise number.',
+        );
+      if (input.pen?.includes('.') && !input.pen.startsWith(`${ENTERPRISE_ARC}.`))
+        throw ctx.fail(
+          'outside_enterprise_arc',
+          'This OID is outside the private enterprise arc 1.3.6.1.4.1.',
+        );
     }
     const budget = startCallBudget(ctx);
     const loaded = await getRegistryStore().getPen(budget);
@@ -203,7 +270,7 @@ export const lookupPen = tool('iana_lookup_pen', {
     });
     return {
       mode: 'organization' as const,
-      found: enterprises.length > 0,
+      found: ranked.length > 0,
       enterprises,
       source: loaded.source,
     };

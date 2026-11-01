@@ -18,8 +18,9 @@ const NUMBER_LINE = /^\d+$/;
 const ORGANIZATION_LINE = /^ {2}(?! )(.*)$/s;
 
 function stateOf(organization: string | undefined): PenState {
-  if (organization === 'Reserved') return 'reserved';
-  if (organization === 'Unassigned' || organization === '---none---') return 'unassigned';
+  const marker = organization?.toLowerCase();
+  if (marker === 'reserved') return 'reserved';
+  if (marker === 'unassigned' || marker === '---none---') return 'unassigned';
   return 'assigned';
 }
 

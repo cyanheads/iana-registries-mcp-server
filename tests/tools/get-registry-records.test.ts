@@ -9,8 +9,8 @@
  * lists, the filters a listing does not apply, the filter-fingerprinted cursor
  * (a pre-ranking `contains` cursor included), `offset` and the absolute
  * `Record N` heading, `cursor_mismatch`, and the cursor's integer and
- * date checks, the 48,000-character output budget and the field, record, and
- * note caps, the 404 retry through the protocol index and the 15-minute memory
+ * date checks, whole values and lists beyond former output boundaries,
+ * whitespace-sensitive literal rendering, the 404 retry and the 15-minute memory
  * of a 404, `non_xml_registry`, email scrubbing with the key column kept
  * verbatim, the declared error rows, the list-enrichment contract on the
  * zero-result and under-cap pages, and `format()` parity and sanitizing.
@@ -133,6 +133,12 @@ function decimalRegistry(values: string[]) {
 }
 
 describe('decimal lookup characterization', () => {
+  it('keeps literal signed range text and width-sensitive byte equality', async () => {
+    decimalRegistry(['-10 to -2', '0x00,0x13']);
+    expect(values(await call({ registry: 'decimal', value: '-10 to -2' }))).toEqual(['-10 to -2']);
+    expect(values(await call({ registry: 'decimal', value: '0x0013' }))).toEqual(['0x00,0x13']);
+    expect(values(await call({ registry: 'decimal', value: '0x13' }))).toEqual([]);
+  });
   it.each([
     ['000443', '443'],
     ['443', '000443'],
@@ -144,6 +150,107 @@ describe('decimal lookup characterization', () => {
     const out = await callTool(getRegistryRecords, { registry: 'decimal', value });
     expect(out.structured).toMatchObject({ totalCount: 1, records: [{ value: cell }] });
     expect(out.text).toContain(cell);
+  });
+});
+
+describe('registry numeric matching extensions', () => {
+  it.each([
+    ['-1000', '-65528 to -269', true],
+    ['-65528', '-65528 to -269', true],
+    ['-269', '-65528 to -269', true],
+    ['-268', '-65528 to -269', false],
+    ['-65537', 'less than -65536', true],
+    ['-65536', 'less than -65536', false],
+    ['9007199254740994', 'greater than 9007199254740993', true],
+    ['9007199254740993', 'greater than 9007199254740993', false],
+    ['-9007199254740994', 'less than -9007199254740993', true],
+    ['0xFF01', '0xFF,0x00-FF', true],
+    ['0x0050', '0x00,0x50-58', true],
+    ['0x0058', '0x00,0x50-58', true],
+    ['0x0059', '0x00,0x50-58', false],
+    ['0xC0FF', '0xC0,0xB6-FF', true],
+    ['{0x01, 0x00}', '0x01-09,*', true],
+    ['0x09 0xff', '0x01-09,*', true],
+    ['0x0a00', '0x01-09,*', false],
+    ['0x0013', '0x00,*', true],
+    ['0x13', '0x00,*', false],
+    ['1301', '0x13,*', false],
+    ['0x0800', '2048', true],
+  ])('%s matches %s: %s', async (value, cell, found) => {
+    decimalRegistry([cell]);
+    const out = await call({ registry: 'decimal', value });
+    expect(values(out)).toEqual(found ? [cell] : []);
+    expect(out.structured.totalCount).toBe(found ? 1 : 0);
+    expect(out.text).toContain(found ? cell : 'No record');
+  });
+
+  it('rejects implicit range-only conflicts but keeps explicit decimal selection', async () => {
+    boot(
+      'ieee-802-numbers',
+      registryXml({
+        id: 'ieee-802-numbers',
+        body: subregistryXml(
+          'ieee-802-numbers-1',
+          [
+            recordXml({ type_decimal: '0000-1500', type_hex: '0000-05DC' }),
+            recordXml({ type_decimal: '2048', type_hex: '0800' }),
+            recordXml({ type_decimal: '2054', type_hex: '0806' }),
+          ].join(''),
+        ),
+      }),
+    );
+    for (const value of ['0800', '0806']) {
+      const out = await call({ registry: 'ieee-802-numbers', value });
+      expect(values(out)).toEqual([]);
+      expect(out.structured.notice).toContain('field set to type_hex');
+      expect(out.text).toContain('field set to type_hex');
+      expect(
+        values(await call({ registry: 'ieee-802-numbers', value, field: 'type_decimal' })),
+      ).toEqual(['0000-1500']);
+    }
+    expect(values(await call({ registry: 'ieee-802-numbers', value: '0x0800' }))).toEqual(['2048']);
+    expect(
+      values(await call({ registry: 'ieee-802-numbers', value: '0x0800', field: 'type_hex' })),
+    ).toEqual(['2048']);
+  });
+
+  it('uses the established PPP bare-hex context without changing decimal registries', async () => {
+    boot(
+      'ppp-numbers',
+      registryXml({
+        id: 'ppp-numbers',
+        body: subregistryXml('ppp-numbers-2', recordXml({ value: 'c021' })),
+      }),
+    );
+    const out = await call({ registry: 'ppp-numbers', value: '0xC021' });
+    expect(values(out)).toEqual(['c021']);
+    expect(out.text).toContain('c021');
+    decimalRegistry(['c021', '0800']);
+    expect(values(await call({ registry: 'decimal', value: '0xC021' }))).toEqual([]);
+    expect(values(await call({ registry: 'decimal', value: '0x0800' }))).toEqual([]);
+  });
+
+  it('pages newly matching rows with the existing filter fingerprint and contains ordering', async () => {
+    decimalRegistry(['0x00,*', '0x00,0x50-58', '0x0050']);
+    const input = { registry: 'decimal', value: '0x0050', contains: 'Unassigned', limit: 1 };
+    const first = await call(input);
+    expect(first.structured).toMatchObject({ totalCount: 3, truncated: true });
+    expect(values(first)).toEqual(['0x00,*']);
+    expect(first.text).toContain('2 more records match');
+    const next = first.structured.next_cursor as string;
+    const second = await call({ ...input, cursor: next });
+    expect(values(second)).toEqual(['0x00,0x50-58']);
+    expect(second.text).toContain('1 more records match');
+    const last = await call({ ...input, cursor: second.structured.next_cursor });
+    expect(values(last)).toEqual(['0x0050']);
+    expect(last.structured).not.toHaveProperty('next_cursor');
+    const past = await call({ ...input, cursor: reMint(next, { offset: 4 }) });
+    expect(values(past)).toEqual([]);
+    expect(past.structured.notice).toContain('offset 4 is past the 3 matching records');
+    expect(past.text).toContain('offset 4 is past the 3 matching records');
+    const changed = await call({ ...input, value: '0x0051', cursor: next });
+    expect(errorOf(changed).data.reason).toBe('cursor_mismatch');
+    expect(changed.text).toContain('cursor_mismatch');
   });
 });
 
@@ -261,7 +368,7 @@ describe('iana_get_registry_records: reading one table', () => {
         {
           title: 'NOTE',
           anchor: 'alpha-1',
-          text: 'First line\nsecond line\nA paragraph\nAnother paragraph',
+          text: 'First line\nsecond line\n\nA paragraph\n\nAnother paragraph',
         },
       ],
       columns: ['value', 'name', 'description', 'file'],
@@ -787,13 +894,13 @@ describe('iana_get_registry_records: value filter', () => {
     expect(out.text).toContain('#### 7\n> **description:** row 1');
   });
 
-  it('never matches a decimal against a hex cell, nor a hex value against a decimal cell', async () => {
+  it('keeps decimal input decimal and converts a scalar hex query to decimal', async () => {
     boot('zeros-registry', ZEROS_XML);
     const key = async (value: string) => values(await call({ registry: 'zeros-registry', value }));
     expect(await key('7')).toEqual(['7']);
     expect(await key('07')).toEqual(['7']);
-    expect(await key('0x7')).toEqual(['0x07']);
-    expect(await key('0x0')).toEqual([]);
+    expect(await key('0x7')).toEqual(['7', '0x07']);
+    expect(await key('0x0')).toEqual(['0']);
     expect(await key('0x150')).toEqual([]);
   });
 
@@ -993,7 +1100,7 @@ describe('iana_get_registry_records: value matches that stay unchanged', () => {
       {
         title: 'NOTE',
         anchor: 'alpha-1',
-        text: 'First line\nsecond line\nA paragraph\nAnother paragraph',
+        text: 'First line\nsecond line\n\nA paragraph\n\nAnother paragraph',
       },
     ]);
     expect(
@@ -1441,7 +1548,7 @@ describe('iana_get_registry_records: root notes on a sub-registry read', () => {
     expect(plain.structured).not.toHaveProperty('registry_notes');
   });
 
-  it('keeps table notes first under the shared 4,000-character budget and cuts the root note that crosses it', async () => {
+  it('keeps table and root notes whole beyond the former shared text budget', async () => {
     boot(
       'shared-notes',
       registryXml({
@@ -1451,36 +1558,34 @@ describe('iana_get_registry_records: root notes on a sub-registry read', () => {
     );
     const out = await call({ registry: 'shared-notes', subregistry: 'table' });
     expect(out.structured.notes).toEqual([{ anchor: 't1', text: 't'.repeat(3_000) }]);
-    expect(out.structured.registry_notes).toEqual([{ anchor: 'r1', text: `${'r'.repeat(999)}…` }]);
-    expect(out.structured.notes_truncated).toBe(true);
-    expect(out.text).toContain(
-      '*Notes cut at the 4,000-character budget (notes_truncated: true).*',
-    );
+    expect(out.structured.registry_notes).toEqual([
+      { anchor: 'r1', text: 'r'.repeat(3_000) },
+      { anchor: 'r2', text: 'tail' },
+    ]);
+    expect(out.structured).not.toHaveProperty('notes_truncated');
+    expect(out.text).toContain('r'.repeat(3_000));
   });
 
   it.each([
-    ['both lists fit exactly', 2_000, 2_000, 1, false],
-    ['the table notes fill the budget', 4_000, 1, 0, true],
-    ['one character of room for the root note', 3_999, 2, 0, true],
-    ['two characters of room for the root note', 3_998, 3, 1, true],
-  ])(
-    'treats %s at the shared budget boundary',
-    async (_label, tableSize, rootSize, rootKept, truncated) => {
-      boot(
-        'edge-shared',
-        registryXml({
-          id: 'edge-shared',
-          body: `<note>${'r'.repeat(rootSize)}</note>${subregistryXml('t', `<note>${'t'.repeat(tableSize)}</note>${recordXml({ value: '1' })}`)}${subregistryXml('u', recordXml({ value: '2' }))}`,
-        }),
-      );
-      const out = await call({ registry: 'edge-shared', subregistry: 't' });
-      expect(out.structured.notes).toHaveLength(1);
-      expect((out.structured.registry_notes as unknown[] | undefined)?.length ?? 0).toBe(rootKept);
-      expect(out.structured.notes_truncated === true).toBe(truncated);
-    },
-  );
+    ['both lists fit exactly', 2_000, 2_000],
+    ['the table notes fill the former budget', 4_000, 1],
+    ['one character beyond the former budget', 3_999, 2],
+    ['two characters beyond the former budget', 3_998, 3],
+  ])('keeps %s whole', async (_label, tableSize, rootSize) => {
+    boot(
+      'edge-shared',
+      registryXml({
+        id: 'edge-shared',
+        body: `<note>${'r'.repeat(rootSize)}</note>${subregistryXml('t', `<note>${'t'.repeat(tableSize)}</note>${recordXml({ value: '1' })}`)}${subregistryXml('u', recordXml({ value: '2' }))}`,
+      }),
+    );
+    const out = await call({ registry: 'edge-shared', subregistry: 't' });
+    expect(out.structured.notes).toHaveLength(1);
+    expect(out.structured.registry_notes).toEqual([{ text: 'r'.repeat(rootSize) }]);
+    expect(out.structured).not.toHaveProperty('notes_truncated');
+  });
 
-  it('counts both lists toward the 25-note cap, table notes first', async () => {
+  it('keeps both note lists whole beyond their former combined count boundary', async () => {
     const notes = (prefix: string, count: number) =>
       Array.from({ length: count }, (_, index) => `<note anchor="${prefix}${index}">x</note>`).join(
         '',
@@ -1500,8 +1605,13 @@ describe('iana_get_registry_records: root notes on a sub-registry read', () => {
       'r2',
       'r3',
       'r4',
+      'r5',
+      'r6',
+      'r7',
+      'r8',
+      'r9',
     ]);
-    expect(out.structured.notice).toBe('Showing the first 25 of 30 notes.');
+    expect(out.structured).not.toHaveProperty('notice');
   });
 });
 
@@ -1607,7 +1717,7 @@ describe('iana_get_registry_records: nested tables', () => {
     ]);
   });
 
-  it('lists the first 250 nested tables and gives their total in the notice', async () => {
+  it('lists every nested table beyond the former count boundary', async () => {
     const children = Array.from({ length: 260 }, (_, index) =>
       subregistryXml(`n${index}`, recordXml({ value: '1' })),
     ).join('');
@@ -1620,10 +1730,10 @@ describe('iana_get_registry_records: nested tables', () => {
     );
     const out = await call({ registry: 'wide-parent', subregistry: 'parent' });
     const listed = out.structured.subregistries as { id: string }[];
-    expect(listed).toHaveLength(250);
-    expect(listed.at(-1)?.id).toBe('n249');
+    expect(listed).toHaveLength(260);
+    expect(listed.at(-1)?.id).toBe('n259');
     expect(out.structured.notice).toBe(
-      'parent holds no records. It nests 260 tables; call again with subregistry set to one of the listed ids. Showing the first 250 of 260 sub-registries.',
+      'parent holds no records. It nests 260 tables; call again with subregistry set to one of the listed ids.',
     );
   });
 
@@ -2081,7 +2191,7 @@ describe('iana_get_registry_records: hex code points', () => {
     },
   );
 
-  it.each(['0x13', '1301', '{0x13,0x01', '0x13,,0x01', '0x00,0x5D'])(
+  it.each(['0x13', '1301', '{0x13,0x01', '0x13,,0x01', '0x00,0x5C'])(
     'finds nothing for %j',
     async (value) => {
       boot('suites-registry', SUITES_XML);
@@ -2090,7 +2200,7 @@ describe('iana_get_registry_records: hex code points', () => {
     },
   );
 
-  it('matches a second-byte range row by its exact text only', async () => {
+  it('retains literal equality for a second-byte range row', async () => {
     boot('suites-registry', SUITES_XML);
     const out = await call({
       registry: 'suites-registry',
@@ -2170,7 +2280,8 @@ describe('iana_get_registry_records: hex code points', () => {
     expect(await code('0x13')).toEqual([]);
     expect(await code('4866')).toEqual([]);
     const keyed = await call({ registry: 'codes-registry', value: '0x1302' });
-    expect(keyed.structured).toMatchObject({ value_field: 'value', totalCount: 0 });
+    expect(keyed.structured).toMatchObject({ value_field: 'value', totalCount: 1 });
+    expect(values(keyed)).toEqual(['4866']);
   });
 });
 
@@ -2269,51 +2380,94 @@ describe('iana_get_registry_records: filters on a listing', () => {
   });
 });
 
-describe('iana_get_registry_records: output budget and caps', () => {
+describe('iana_get_registry_records: whole output and record-count pagination', () => {
+  it('returns whole mixed prose and artwork through both surfaces', async () => {
+    const artwork = `  | bit | column    |\n\t| 0   | value     |\n\n> quoted artwork\nnext line\n  ${'`'.repeat(8)}\n  tail`;
+    const expected = `Before.\n\n${artwork}\n\nAfter.\n\n${'z'.repeat(2_500)}`;
+    boot(
+      'literal-art',
+      registryXml({
+        id: 'literal-art',
+        body: `<record><value>1</value><description><paragraph>Before.</paragraph><artwork>${artwork}</artwork><paragraph>After.</paragraph><paragraph>${'z'.repeat(2_500)}</paragraph></description></record>`,
+      }),
+    );
+    const out = await call({ registry: 'literal-art' });
+    expect(records(out)[0]?.fields.description).toBe(expected);
+    expect(out.text).toContain(`${'`'.repeat(9)}\n${expected}\n${'`'.repeat(9)}`);
+    expect(records(out)[0]).not.toHaveProperty('cut_fields');
+  });
+
+  it('pages whole records solely by limit beyond former byte budgets', async () => {
+    boot(
+      'whole-pages',
+      registryXml({
+        id: 'whole-pages',
+        body: numberedRecords(203, () => ({ description: 'x'.repeat(2_501) })),
+      }),
+    );
+    const first = await call({ registry: 'whole-pages', limit: 100 });
+    const second = await call({
+      registry: 'whole-pages',
+      limit: 100,
+      cursor: first.structured.next_cursor,
+    });
+    const last = await call({
+      registry: 'whole-pages',
+      limit: 100,
+      cursor: second.structured.next_cursor,
+    });
+    expect([records(first).length, records(second).length, records(last).length]).toEqual([
+      100, 100, 3,
+    ]);
+    expect([...values(first), ...values(second), ...values(last)]).toEqual(
+      Array.from({ length: 203 }, (_, i) => String(i)),
+    );
+    expect(records(first)[99]?.fields.description).toBe('x'.repeat(2_501));
+    expect(first.text).toContain('x'.repeat(2_501));
+    expect(last.structured).not.toHaveProperty('next_cursor');
+  });
+  it('keeps short plain fields and optional cut markers absent', async () => {
+    decimalRegistry(['1']);
+    const out = await call({ registry: 'decimal' });
+    expect(records(out)[0]?.fields.description).toBe('Unassigned');
+    expect(out.text).toContain('> **description:** Unassigned');
+    expect(records(out)[0]).not.toHaveProperty('cut_fields');
+    expect(out.structured).not.toHaveProperty('notes_truncated');
+  });
   const big = () =>
     registryXml({
       id: 'big-registry',
       body: numberedRecords(100, () => ({ description: 'x'.repeat(1_500) })),
     });
 
-  it('stops a page at 48,000 serialized characters and continues from the next record', async () => {
+  it('returns the requested record count beyond the former serialized page boundary', async () => {
     boot('big-registry', big());
     const first = await call({ registry: 'big-registry', limit: 100 });
     const rows = records(first);
     const serialized = JSON.stringify(rows).length;
-    expect(serialized).toBeLessThanOrEqual(48_000);
-    expect(rows.length).toBeGreaterThan(25);
-    expect(rows.length).toBeLessThan(100);
-
-    const second = await call({
-      registry: 'big-registry',
-      limit: 100,
-      cursor: first.structured.next_cursor,
-    });
-    const nextSize = JSON.stringify(records(second)[0]).length;
-    expect(serialized + 1 + nextSize).toBeGreaterThan(48_000);
-    expect(records(second)[0]?.value).toBe(String(rows.length));
+    expect(serialized).toBeGreaterThan(48_000);
+    expect(rows).toHaveLength(100);
+    expect(first.structured).not.toHaveProperty('next_cursor');
 
     expect(first.structured).toMatchObject({
       totalCount: 100,
       shown: rows.length,
       cap: 100,
-      truncated: true,
-      notice: `This page stopped at the 48,000-character output budget after ${rows.length} records; ${100 - rows.length} more match. Pass next_cursor as cursor to continue.`,
+      truncated: false,
     });
   });
 
-  it('walks a budget-cut registry to the end, each record once, every page within budget', async () => {
+  it('walks large records to the end, each record once, using limit for every page', async () => {
     boot('big-registry', big());
     const seen: string[] = [];
     let cursor: string | undefined;
     do {
       const out = await call({
         registry: 'big-registry',
-        limit: 100,
+        limit: 30,
         ...(cursor ? { cursor } : {}),
       });
-      expect(JSON.stringify(records(out)).length).toBeLessThanOrEqual(48_000);
+      expect(records(out).length).toBeLessThanOrEqual(30);
       seen.push(...values(out).map(String));
       cursor = out.structured.next_cursor as string | undefined;
     } while (cursor);
@@ -2329,18 +2483,14 @@ describe('iana_get_registry_records: output budget and caps', () => {
     expect(out.structured).not.toHaveProperty('next_cursor');
   });
 
-  it('moves a record to the next page when it would cross 48,000 characters by one', async () => {
+  it('keeps the record crossing the former serialized boundary by one character', async () => {
     const { xml } = exactBudgetRegistry('one-over', 26, 48_001);
     boot('one-over', xml);
     const first = await call({ registry: 'one-over', limit: 100 });
-    expect(records(first)).toHaveLength(25);
-    expect(first.structured.next_cursor).toBeDefined();
-    const second = await call({
-      registry: 'one-over',
-      limit: 100,
-      cursor: first.structured.next_cursor,
-    });
-    expect(values(second)).toEqual(['35']);
+    expect(records(first)).toHaveLength(26);
+    expect(JSON.stringify(records(first))).toHaveLength(48_001);
+    expect(first.structured).not.toHaveProperty('next_cursor');
+    expect(values(first).at(-1)).toBe('35');
   });
 
   it('always returns the first record of a page, however large', async () => {
@@ -2352,18 +2502,13 @@ describe('iana_get_registry_records: output budget and caps', () => {
     ).join('');
     boot('wide-rows', registryXml({ id: 'wide-rows', body: wide }));
     const first = await call({ registry: 'wide-rows', limit: 100 });
-    expect(records(first)).toHaveLength(1);
-    expect(first.structured).toMatchObject({ totalCount: 3, truncated: true });
-    expect(first.structured.next_cursor).toBeDefined();
-    const second = await call({
-      registry: 'wide-rows',
-      limit: 100,
-      cursor: first.structured.next_cursor,
-    });
-    expect(values(second)).toEqual(['1']);
+    expect(records(first)).toHaveLength(3);
+    expect(first.structured).toMatchObject({ totalCount: 3, truncated: false });
+    expect(first.structured).not.toHaveProperty('next_cursor');
+    expect(values(first)).toEqual(['0', '1', '2']);
   });
 
-  it('cuts a field at 2,000 characters ending in an ellipsis and names it in cut_fields', async () => {
+  it('keeps fields on both sides of the former text boundary whole', async () => {
     boot(
       'long-field',
       registryXml({
@@ -2378,25 +2523,26 @@ describe('iana_get_registry_records: output budget and caps', () => {
     );
     const out = await call({ registry: 'long-field' });
     const [row] = records(out);
-    expect(row?.fields.description).toBe(`${'a'.repeat(1_999)}…`);
+    expect(row?.fields.description).toBe('a'.repeat(2_500));
     expect(row?.fields.exact).toBe('b'.repeat(2_000));
-    expect(row?.fields.over).toBe(`${'c'.repeat(1_999)}…`);
-    expect(row?.cut_fields).toEqual(['description', 'over']);
-    expect(out.text).toContain('**Cut fields:** description, over');
+    expect(row?.fields.over).toBe('c'.repeat(2_001));
+    expect(row).not.toHaveProperty('cut_fields');
+    expect(out.text).toContain('a'.repeat(2_500));
+    expect(out.text).toContain('c'.repeat(2_001));
   });
 
-  it('never splits a surrogate pair at the cut', async () => {
+  it('keeps surrogate pairs and their following text whole', async () => {
     const split = `${'x'.repeat(1_998)}\u{1F600}tail`;
     const kept = `${'x'.repeat(1_997)}\u{1F600}tail`;
     boot('astral', registryXml({ id: 'astral', body: recordXml({ value: '1', split, kept }) }));
     const [row] = records(await call({ registry: 'astral' }));
-    expect(row?.fields.split).toBe(`${'x'.repeat(1_998)}…`);
-    expect(row?.fields.kept).toBe(`${'x'.repeat(1_997)}\u{1F600}…`);
+    expect(row?.fields.split).toBe(split);
+    expect(row?.fields.kept).toBe(kept);
     expect(row?.fields.split?.isWellFormed()).toBe(true);
     expect(row?.fields.kept?.isWellFormed()).toBe(true);
   });
 
-  it('caps a long key column at 2,000 characters in both value and fields', async () => {
+  it('keeps a long key column whole in both value and fields', async () => {
     const key = 'k'.repeat(2_300);
     boot(
       'long-key',
@@ -2404,21 +2550,21 @@ describe('iana_get_registry_records: output budget and caps', () => {
     );
     const out = await call({ registry: 'long-key' });
     const [row] = records(out);
-    expect(row?.value).toBe(`${'k'.repeat(1_999)}…`);
+    expect(row?.value).toBe(key);
     expect(row?.fields.value).toBe(row?.value);
-    expect(row?.cut_fields).toEqual(['value']);
+    expect(row).not.toHaveProperty('cut_fields');
   });
 
-  it('keeps 16 fields and names the dropped ones in cut_fields', async () => {
+  it('keeps every field beyond the former field-count boundary', async () => {
     boot('wide-record', registryXml({ id: 'wide-record', body: wideRecordXml(20) }));
     const out = await call({ registry: 'wide-record' });
     const [row] = records(out);
     expect(Object.keys(row?.fields ?? {})).toEqual(
-      Array.from({ length: 16 }, (_, index) => `f${String(index + 1).padStart(2, '0')}`),
+      Array.from({ length: 20 }, (_, index) => `f${String(index + 1).padStart(2, '0')}`),
     );
-    expect(row?.cut_fields).toEqual(['f17', 'f18', 'f19', 'f20']);
+    expect(row).not.toHaveProperty('cut_fields');
     expect(out.structured.columns).toHaveLength(20);
-    expect(out.text).toContain('**Cut fields:** f17, f18, f19, f20');
+    expect(out.text).toContain('**f20:**');
   });
 
   it('does not flag a record with exactly 16 fields', async () => {
@@ -2428,7 +2574,7 @@ describe('iana_get_registry_records: output budget and caps', () => {
     expect(row).not.toHaveProperty('cut_fields');
   });
 
-  it('caps the notes at 4,000 characters, cutting the note that crosses the line', async () => {
+  it('keeps all notes whole beyond the former combined text boundary', async () => {
     const notes = `<note anchor="n1">${'a'.repeat(3_000)}</note><note anchor="n2">${'b'.repeat(3_000)}</note><note anchor="n3">c</note>`;
     boot(
       'long-notes',
@@ -2436,21 +2582,19 @@ describe('iana_get_registry_records: output budget and caps', () => {
     );
     const out = await call({ registry: 'long-notes' });
     const kept = out.structured.notes as { anchor: string; text: string }[];
-    expect(kept.map((note) => note.anchor)).toEqual(['n1', 'n2']);
+    expect(kept.map((note) => note.anchor)).toEqual(['n1', 'n2', 'n3']);
     expect(kept[0]?.text).toHaveLength(3_000);
-    expect(kept[1]?.text).toBe(`${'b'.repeat(999)}…`);
-    expect(out.structured.notes_truncated).toBe(true);
-    expect(out.text).toContain(
-      '*Notes cut at the 4,000-character budget (notes_truncated: true).*',
-    );
+    expect(kept[1]?.text).toBe('b'.repeat(3_000));
+    expect(out.structured).not.toHaveProperty('notes_truncated');
+    expect(out.text).toContain('b'.repeat(3_000));
   });
 
   it.each([
-    ['notes that fit exactly', [4_000], 1, false],
-    ['a note after a full budget', [4_000, 1], 1, true],
-    ['one character of room left', [3_999, 2], 1, true],
-    ['two characters of room left', [3_998, 3], 2, true],
-  ])('treats %s at the notes budget boundary', async (_label, sizes, keptCount, truncated) => {
+    ['notes that fit exactly', [4_000]],
+    ['a note after the former budget', [4_000, 1]],
+    ['one character beyond the former budget', [3_999, 2]],
+    ['two characters beyond the former budget', [3_998, 3]],
+  ])('keeps %s whole', async (_label, sizes) => {
     const notes = sizes
       .map((size, index) => `<note anchor="n${index}">${'n'.repeat(size)}</note>`)
       .join('');
@@ -2459,8 +2603,11 @@ describe('iana_get_registry_records: output budget and caps', () => {
       registryXml({ id: 'edge-notes', body: `${notes}${recordXml({ value: '1' })}` }),
     );
     const out = await call({ registry: 'edge-notes' });
-    expect(out.structured.notes).toHaveLength(keptCount);
-    expect(out.structured.notes_truncated === true).toBe(truncated);
+    expect(out.structured.notes).toHaveLength(sizes.length);
+    expect((out.structured.notes as { text: string }[]).map((note) => note.text.length)).toEqual(
+      sizes,
+    );
+    expect(out.structured).not.toHaveProperty('notes_truncated');
   });
 
   /** `count` RFC xrefs numbered from 1. */
@@ -2471,7 +2618,7 @@ describe('iana_get_registry_records: output budget and caps', () => {
   const rangeXml = (value: string, rule = 'IETF Review', note = '') =>
     `<range><value>${value}</value><registration_rule>${rule}</registration_rule>${note ? `<note>${note}</note>` : ''}</range>`;
 
-  it('cuts the description, registration procedure, and range text at 2,000 characters', async () => {
+  it('keeps description, registration procedure, and range text whole', async () => {
     boot(
       'long-header',
       registryXml({
@@ -2482,19 +2629,19 @@ describe('iana_get_registry_records: output budget and caps', () => {
     );
     const out = await call({ registry: 'long-header' });
     expect(out.structured).toMatchObject({
-      registration_procedure: `${'q'.repeat(1_999)}…`,
-      description: `${'d'.repeat(1_999)}…`,
+      registration_procedure: 'q'.repeat(2_500),
+      description: 'd'.repeat(2_001),
       registration_ranges: [
         {
-          range: `${'r'.repeat(1_999)}…`,
+          range: 'r'.repeat(2_100),
           procedure: 'p'.repeat(2_000),
-          note: `${'n'.repeat(1_999)}…`,
+          note: 'n'.repeat(3_000),
         },
       ],
     });
   });
 
-  it('cuts the root description and procedure on a sub-registry listing', async () => {
+  it('keeps root description and procedure whole on a sub-registry listing', async () => {
     const subs = ['a', 'b'].map((id) => subregistryXml(id, recordXml({ value: '1' }))).join('');
     boot(
       'long-listing',
@@ -2506,22 +2653,21 @@ describe('iana_get_registry_records: output budget and caps', () => {
     );
     const out = await call({ registry: 'long-listing' });
     expect(out.structured.subregistries).toHaveLength(2);
-    expect(out.structured.registration_procedure).toBe(`${'q'.repeat(1_999)}…`);
-    expect(out.structured.description).toBe(`${'d'.repeat(1_999)}…`);
+    expect(out.structured.registration_procedure).toBe('q'.repeat(2_001));
+    expect(out.structured.description).toBe('d'.repeat(2_500));
   });
 
-  it('keeps the first 25 table references and gives their total in the notice', async () => {
+  it('keeps every table reference beyond the former count boundary', async () => {
     boot(
       'many-refs',
       registryXml({ id: 'many-refs', body: `${xrefs(30)}${recordXml({ value: '1' })}` }),
     );
     const out = await call({ registry: 'many-refs' });
     const refs = out.structured.references as { id: string }[];
-    expect(refs).toHaveLength(25);
-    expect(refs.at(-1)?.id).toBe('RFC 25');
-    expect(out.structured.notice).toBe('Showing the first 25 of 30 table references.');
-    expect(out.text).toContain('Showing the first 25 of 30 table references.');
-    expect(out.text).not.toContain('RFC 26');
+    expect(refs).toHaveLength(30);
+    expect(refs.at(-1)?.id).toBe('RFC 30');
+    expect(out.structured).not.toHaveProperty('notice');
+    expect(out.text).toContain('RFC 30');
   });
 
   it('keeps 25 table references without a notice', async () => {
@@ -2534,7 +2680,7 @@ describe('iana_get_registry_records: output budget and caps', () => {
     expect(out.structured).not.toHaveProperty('notice');
   });
 
-  it('keeps the first 25 references of each record and counts the records cut', async () => {
+  it('keeps every reference of every record', async () => {
     const body = [
       recordXml({ value: '1' }, xrefs(26)),
       recordXml({ value: '2' }, xrefs(25)),
@@ -2542,23 +2688,20 @@ describe('iana_get_registry_records: output budget and caps', () => {
     ].join('');
     boot('record-refs', registryXml({ id: 'record-refs', body }));
     const out = await call({ registry: 'record-refs' });
-    expect(records(out).map((row) => row.references.length)).toEqual([25, 25, 25]);
-    expect(records(out)[2]?.references.at(-1)?.id).toBe('RFC 25');
-    expect(out.structured.notice).toBe(
-      '2 records on this page list more than 25 references; only the first 25 of each are shown.',
-    );
+    expect(records(out).map((row) => row.references.length)).toEqual([26, 25, 400]);
+    expect(records(out)[2]?.references.at(-1)?.id).toBe('RFC 400');
+    expect(out.structured).not.toHaveProperty('notice');
 
     boot(
       'record-ref',
       registryXml({ id: 'record-ref', body: recordXml({ value: '1' }, xrefs(30)) }),
     );
     const one = await call({ registry: 'record-ref' });
-    expect(one.structured.notice).toBe(
-      'One record on this page lists more than 25 references; only the first 25 are shown.',
-    );
+    expect(records(one)[0]?.references).toHaveLength(30);
+    expect(one.structured).not.toHaveProperty('notice');
   });
 
-  it('keeps the first 25 registration ranges and gives their total in the notice', async () => {
+  it('keeps every registration range beyond the former count boundary', async () => {
     const ranges = Array.from({ length: 40 }, (_, index) => rangeXml(`${index}-${index}`)).join('');
     boot(
       'many-ranges',
@@ -2566,12 +2709,12 @@ describe('iana_get_registry_records: output budget and caps', () => {
     );
     const out = await call({ registry: 'many-ranges' });
     const kept = out.structured.registration_ranges as { range: string }[];
-    expect(kept).toHaveLength(25);
-    expect(kept.at(-1)?.range).toBe('24-24');
-    expect(out.structured.notice).toBe('Showing the first 25 of 40 registration ranges.');
+    expect(kept).toHaveLength(40);
+    expect(kept.at(-1)?.range).toBe('39-39');
+    expect(out.structured).not.toHaveProperty('notice');
   });
 
-  it('lists the first 250 sub-registries and gives their total in the notice', async () => {
+  it('lists every sub-registry beyond the former count boundary', async () => {
     const subs = (count: number) =>
       Array.from({ length: count }, (_, index) =>
         subregistryXml(`s${index}`, recordXml({ value: '1' })),
@@ -2579,12 +2722,12 @@ describe('iana_get_registry_records: output budget and caps', () => {
     boot('wide-listing', registryXml({ id: 'wide-listing', body: subs(260) }));
     const out = await call({ registry: 'wide-listing' });
     const listed = out.structured.subregistries as { id: string }[];
-    expect(listed).toHaveLength(250);
-    expect(listed.at(-1)?.id).toBe('s249');
+    expect(listed).toHaveLength(260);
+    expect(listed.at(-1)?.id).toBe('s259');
     expect(out.structured.notice).toBe(
-      'This registry has 260 sub-registries; call again with subregistry set to one of the listed ids. Showing the first 250 of 260 sub-registries.',
+      'This registry has 260 sub-registries; call again with subregistry set to one of the listed ids.',
     );
-    expect(out.text).toContain('**Sub-registries (250):**');
+    expect(out.text).toContain('**Sub-registries (260):**');
 
     boot('listing-250', registryXml({ id: 'listing-250', body: subs(250) }));
     const exact = await call({ registry: 'listing-250' });
@@ -2594,29 +2737,28 @@ describe('iana_get_registry_records: output budget and caps', () => {
     );
   });
 
-  it('names at most 250 sub-registries in unknown_subregistry', async () => {
+  it('names every sub-registry in unknown_subregistry', async () => {
     const subs = Array.from({ length: 300 }, (_, index) =>
       subregistryXml(`s${index}`, recordXml({ value: '1' })),
     ).join('');
     boot('wide-error', registryXml({ id: 'wide-error', body: subs }));
     const out = await call({ registry: 'wide-error', subregistry: 'nope' });
     const { data } = errorOf(out);
-    expect(data.subregistries).toHaveLength(250);
+    expect(data.subregistries).toHaveLength(300);
     const hint = (data.recovery as { hint: string }).hint;
     expect(hint).toContain('s249');
-    expect(hint).not.toContain('s250');
-    expect(hint.endsWith('; 50 more are not named here.')).toBe(true);
+    expect(hint).toContain('s299');
+    expect(hint.endsWith('s299.')).toBe(true);
   });
 
-  /** `c` repeated `length` times as the tool returns it: whole up to 2,000 characters, else 1,999 of them and `…`. */
-  const shown = (c: string, length: number) =>
-    length > 2_000 ? `${c.repeat(1_999)}…` : c.repeat(length);
+  /** An upstream value returned whole. */
+  const shown = (c: string, length: number) => c.repeat(length);
   /** The longest run of one repeated character in `text`. */
   const longestRun = (text: string) =>
     Math.max(...(text.match(/(.)\1*/gsu) ?? ['']).map((run) => run.length));
 
   it.each([2_000, 2_001])(
-    'returns each upstream text of a table and its records whole at %i characters up to 2,000, cut past it',
+    'returns each upstream text of a table and its records whole at %i characters',
     async (length) => {
       const text = (c: string) => c.repeat(length);
       const cut = (c: string) => shown(c, length);
@@ -2644,7 +2786,7 @@ describe('iana_get_registry_records: output budget and caps', () => {
         columns: [cut('n'), 'description'],
         value_field: cut('n'),
       });
-      const value = `${'v'.repeat(1_999)}…`;
+      const value = 'v'.repeat(2_001);
       expect(records(out)).toEqual([
         {
           value,
@@ -2652,11 +2794,10 @@ describe('iana_get_registry_records: output budget and caps', () => {
           references: [{ type: 'note', id: cut('e'), section: cut('6'), label: cut('f') }],
           registered: cut('r'),
           updated: cut('w'),
-          cut_fields: [cut('n')],
         },
       ]);
       expect(out.structured).not.toHaveProperty('notice');
-      const longest = length > 2_000 ? 1_999 : length;
+      const longest = Math.max(length, 2_001);
       expect(longestRun(out.text)).toBe(longest);
       expect(longestRun(JSON.stringify(out.structured))).toBe(longest);
 
@@ -2668,11 +2809,11 @@ describe('iana_get_registry_records: output budget and caps', () => {
   );
 
   it.each([2_000, 2_001])(
-    'names %i-character sub-registry ids and titles whole up to 2,000 characters, cut past it, in a listing and in unknown_subregistry',
+    'names %i-character sub-registry ids and titles whole in a listing and in unknown_subregistry',
     async (length) => {
       const text = (c: string) => c.repeat(length);
       const cut = (c: string) => shown(c, length);
-      const longest = length > 2_000 ? 1_999 : length;
+      const longest = length;
       const subs = [
         subregistryXml(text('p'), recordXml({ value: '1' }), text('g')),
         subregistryXml(text('q'), recordXml({ value: '1' }), text('h')),
@@ -2701,7 +2842,7 @@ describe('iana_get_registry_records: output budget and caps', () => {
 
   it.each([
     [2_000, true],
-    [2_001, false],
+    [2_001, true],
   ])('keeps a %i-character reference URL: %s', async (length, kept) => {
     const uri = `https://example.org/${'a'.repeat(length - 20)}`;
     const xref = `<xref type="uri" data="${uri}"/>`;
@@ -2710,58 +2851,54 @@ describe('iana_get_registry_records: output budget and caps', () => {
       registryXml({ id: 'long-url', body: `${xref}${recordXml({ value: '1' }, xref)}` }),
     );
     const out = await call({ registry: 'long-url' });
-    const expected = kept
-      ? { type: 'uri', id: uri, url: uri }
-      : { type: 'uri', id: `${uri.slice(0, 1_999)}…` };
+    const expected = { type: 'uri', id: uri, url: uri };
+    expect(kept).toBe(true);
     expect(out.structured.references).toEqual([expected]);
     expect(records(out)[0]?.references).toEqual([expected]);
+    expect(out.text).toContain(uri);
   });
 
   it.each([
     [50, undefined],
-    [51, 'Showing the first 50 of 51 columns.'],
-  ])('lists the first 50 of %i columns', async (count, notice) => {
+    [51, undefined],
+  ])('lists every one of %i columns', async (count, notice) => {
     const body = Array.from({ length: count }, (_, index) =>
       recordXml({ [`c${String(index).padStart(2, '0')}`]: 'x' }),
     ).join('');
     boot('many-columns', registryXml({ id: 'many-columns', body }));
     const out = await call({ registry: 'many-columns', limit: 100 });
     const columns = out.structured.columns as string[];
-    expect(columns).toHaveLength(50);
-    expect(columns.at(-1)).toBe('c49');
+    expect(columns).toHaveLength(count);
+    expect(columns.at(-1)).toBe(`c${count - 1}`);
     expect(records(out)).toHaveLength(count);
     expect(out.structured.notice).toBe(notice);
   });
 
   it.each([
     [48, undefined],
-    [
-      49,
-      'One record on this page has more than 32 cut fields; its cut_fields names only the first 32.',
-    ],
-  ])('names the first 32 cut fields of a %i-field record', async (fieldCount, notice) => {
+    [49, undefined],
+  ])('returns every field of a %i-field record without cut markers', async (fieldCount, notice) => {
     boot('cut-names', registryXml({ id: 'cut-names', body: wideRecordXml(fieldCount) }));
     const out = await call({ registry: 'cut-names' });
     const [row] = records(out);
-    expect(row?.cut_fields).toHaveLength(32);
-    expect(row?.cut_fields?.at(-1)).toBe('f48');
+    expect(Object.keys(row?.fields ?? {})).toHaveLength(fieldCount);
+    expect(row).not.toHaveProperty('cut_fields');
     expect(out.structured.notice).toBe(notice);
   });
 
-  it('counts the records on a page whose cut fields pass 32', async () => {
+  it('returns all fields for several records beyond the former field-count boundaries', async () => {
     const body = `${wideRecordXml(49)}${wideRecordXml(48)}${wideRecordXml(49)}`;
     boot('cut-names-page', registryXml({ id: 'cut-names-page', body }));
     const out = await call({ registry: 'cut-names-page' });
-    expect(records(out).map((row) => row.cut_fields?.length)).toEqual([32, 32, 32]);
-    expect(out.structured.notice).toBe(
-      '2 records on this page have more than 32 cut fields; cut_fields names only the first 32 of each.',
-    );
+    expect(records(out).map((row) => Object.keys(row.fields).length)).toEqual([49, 48, 49]);
+    for (const row of records(out)) expect(row).not.toHaveProperty('cut_fields');
+    expect(out.structured).not.toHaveProperty('notice');
   });
 
   it.each([
     [25, undefined],
-    [26, 'Showing the first 25 of 26 notes.'],
-  ])('returns the first 25 of %i notes, on a table read and a listing', async (count, notice) => {
+    [26, undefined],
+  ])('returns every one of %i notes, on a table read and a listing', async (count, notice) => {
     const notes = Array.from(
       { length: count },
       (_, index) => `<note anchor="n${index}">Note ${index}.</note>`,
@@ -2772,15 +2909,15 @@ describe('iana_get_registry_records: output budget and caps', () => {
     );
     const out = await call({ registry: 'many-notes' });
     const kept = out.structured.notes as { anchor: string }[];
-    expect(kept).toHaveLength(25);
-    expect(kept.at(-1)?.anchor).toBe('n24');
+    expect(kept).toHaveLength(count);
+    expect(kept.at(-1)?.anchor).toBe(`n${count - 1}`);
     expect(out.structured).not.toHaveProperty('notes_truncated');
     expect(out.structured.notice).toBe(notice);
 
     const subs = ['a', 'b'].map((id) => subregistryXml(id, recordXml({ value: '1' }))).join('');
     boot('many-root-notes', registryXml({ id: 'many-root-notes', body: `${notes}${subs}` }));
     const listing = await call({ registry: 'many-root-notes' });
-    expect(listing.structured.notes).toHaveLength(25);
+    expect(listing.structured.notes).toHaveLength(count);
     expect(listing.structured.notice).toBe(
       [
         'This registry has 2 sub-registries; call again with subregistry set to one of the listed ids.',
@@ -2791,7 +2928,7 @@ describe('iana_get_registry_records: output budget and caps', () => {
     );
   });
 
-  it('leaves the note count out of the notice when the text budget cut the notes first', async () => {
+  it('keeps notes beyond both former text and count boundaries', async () => {
     const notes = Array.from(
       { length: 30 },
       (_, index) => `<note anchor="n${index}">${'t'.repeat(200)}</note>`,
@@ -2801,15 +2938,15 @@ describe('iana_get_registry_records: output budget and caps', () => {
       registryXml({ id: 'budget-notes', body: `${notes}${recordXml({ value: '1' })}` }),
     );
     const out = await call({ registry: 'budget-notes' });
-    expect(out.structured.notes).toHaveLength(20);
-    expect(out.structured.notes_truncated).toBe(true);
+    expect(out.structured.notes).toHaveLength(30);
+    expect(out.structured).not.toHaveProperty('notes_truncated');
     expect(out.structured).not.toHaveProperty('notice');
   });
 
   it.each([
     [25, ''],
-    [26, '; 1 more are not named here'],
-  ])('names the first 25 of %i files in non_xml_registry', async (count, more) => {
+    [26, ''],
+  ])('names every one of %i files in non_xml_registry', async (count, more) => {
     const files = Array.from(
       { length: count },
       (_, index) => `<file type="legacy">f${index}.txt</file>`,
@@ -2817,7 +2954,7 @@ describe('iana_get_registry_records: output budget and caps', () => {
     boot('many-files', registryXml({ id: 'many-files', body: files }));
     const error = errorOf(await call({ registry: 'many-files' }));
     const fileUrl = (index: number) => `https://www.iana.org/assignments/many-files/f${index}.txt`;
-    const named = Array.from({ length: 25 }, (_, index) => fileUrl(index)).join(', ');
+    const named = Array.from({ length: count }, (_, index) => fileUrl(index)).join(', ');
     expect(error.data).toMatchObject({ reason: 'non_xml_registry', file: fileUrl(0) });
     expect(error.message).toContain(`(${named}${more}); its XML file holds no records.`);
     expect((error.data.recovery as { hint: string }).hint).toBe(
@@ -2826,7 +2963,7 @@ describe('iana_get_registry_records: output budget and caps', () => {
   });
 
   it.each([2_000, 2_001])(
-    'names a %i-character table id and file URL in non_xml_registry whole up to 2,000 characters, cut past it',
+    'names a %i-character table id and file URL whole in non_xml_registry',
     async (length) => {
       const fileUrl = `https://example.org/${'z'.repeat(length - 20)}`;
       boot(
@@ -2834,7 +2971,7 @@ describe('iana_get_registry_records: output budget and caps', () => {
         registryXml({ id: 'i'.repeat(length), body: `<file type="legacy">${fileUrl}</file>` }),
       );
       const error = errorOf(await call({ registry: 'long-file' }));
-      const named = length > 2_000 ? `${fileUrl.slice(0, 1_999)}…` : fileUrl;
+      const named = fileUrl;
       expect(error.data).toMatchObject({
         reason: 'non_xml_registry',
         registry: shown('i', length),
@@ -2843,7 +2980,7 @@ describe('iana_get_registry_records: output budget and caps', () => {
       expect(error.message).toContain(
         `${shown('i', length)} is published only as plain text (${named}); its XML file holds no records.`,
       );
-      expect(longestRun(JSON.stringify(error))).toBe(length > 2_000 ? 1_999 : length);
+      expect(longestRun(JSON.stringify(error))).toBe(length);
     },
   );
 });
@@ -3205,17 +3342,18 @@ describe('iana_get_registry_records: record-less registries', () => {
     expect(s.fetched()).toEqual([registryXmlUrl('example-yang-algs')]);
   });
 
-  it('renders the description as a quote after the registration procedure', async () => {
+  it('renders a multiline description literally after the registration procedure', async () => {
     boot('example-yang-algs', YANG_MODULE_XML);
     const lines = (await call({ registry: 'example-yang-algs' })).text.split('\n');
     const at = lines.indexOf('**Description:**');
     expect(at).toBeGreaterThan(lines.indexOf('**Registration procedure:** Expert Review'));
-    expect(lines.slice(at + 1, at + 6)).toEqual([
-      '> This module mirrors the',
-      '> Example Parameters (example-parameters) registry.',
-      `> Module file: ${MODULE_LINK}`,
-      String.raw`> Questions go to \[email removed\].`,
-      '',
+    expect(lines.slice(at + 1, at + 7)).toEqual([
+      '```',
+      'This module mirrors the',
+      'Example Parameters (example-parameters) registry.',
+      `Module file: ${MODULE_LINK}`,
+      'Questions go to [email removed].',
+      '```',
     ]);
   });
 
@@ -3299,12 +3437,12 @@ describe('iana_get_registry_records: format()', () => {
     expect(out.text).toContain('**Registration procedure:** Expert Review');
     expect(out.text).toContain('- 0-223 — Standards Action (Assigned by the working group.)');
     expect(out.text).toContain('- 224-255 — Private Use');
-    expect(out.text).toContain('**Note (NOTE) [anchor alpha-1]:**\n> First line\n> second line');
+    expect(out.text).toContain('**Note (NOTE) [anchor alpha-1]:**\n```\nFirst line\nsecond line');
     expect(out.text).toContain(
       '**Columns:** value, name, description, file · **Key column:** value',
     );
     expect(out.text).toContain(
-      '#### 1\n> **name:** alpha-one\n> **description:** Mixed RFC8446, Section 4.2 content\n> after the break',
+      '#### 1\n> **name:** alpha-one\n\n**description:**\n```\nMixed RFC8446, Section 4.2 content\nafter the break\n```',
     );
     expect(out.text).toContain('**Registered:** 2019-04-01');
     expect(out.text).toContain('- 1234 (rfc-errata) <https://www.rfc-editor.org/errata/eid1234>');
@@ -3391,14 +3529,24 @@ describe('iana_get_registry_records: format()', () => {
     const lines = out.text.split('\n');
     expect(lines).toContain(String.raw`## Evil \[t\](https://evil.example/) \<b\> (evil-registry)`);
     expect(lines).toContain(String.raw`**Sub-registry:** sub-evil — Sub \[y\](z) ?`);
-    expect(lines).toContain('- 0-1 # R — RR # Q (RN - n)');
+    expect(out.text).toContain('**Range:**\n```\n0-1\n# R\n```');
+    expect(out.text).toContain('**Procedure:**\n```\nRR\n# Q\n```');
+    expect(out.text).toContain('**Range note:**\n```\nRN\n- n\n```');
     expect(lines).toContain(String.raw`#### k # K heading \[x\](y)`);
-    expect(lines).toContain('> # D');
+    expect(out.text).toContain(
+      '```\n![i](https://evil.example/i.png)\n# D\n---\n<script>x</script>\n```',
+    );
     expect(lines).toContain(String.raw`- ref ## RefHeading \[x\](y) (text)`);
     expect(lines).toContain('- RFC 9110 (rfc) §1 2 <https://www.rfc-editor.org/rfc/rfc9110.html>');
     expect(lines).toContain(String.raw`- https://example.org/a b)\>\[c\] (uri)`);
-    expect(lines).toContain('> # N heading');
-    expect(lines.some((line) => /^(# |## (?!Evil)|- item|---$|- n$)/.test(line))).toBe(false);
+    expect(out.text).toContain('# N heading');
+    const outsideFences = out.text
+      .split('```')
+      .filter((_part, index) => index % 2 === 0)
+      .join('');
+    expect(
+      outsideFences.split('\n').some((line) => /^(# |## (?!Evil)|- item|---$|- n$)/.test(line)),
+    ).toBe(false);
     expect(out.text).not.toMatch(/[\u202E\u0007]/);
   });
 
