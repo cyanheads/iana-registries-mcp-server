@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.3.0](changelog/0.3.x/0.3.0.md) — 2026-10-31
+
+Preserve complete registry text and resolve protocol assignments through their references.
+
 ## [0.2.1](changelog/0.2.x/0.2.1.md) — 2026-10-17
 
 Exact registry ranges, canonical language tags, and bounded batches.

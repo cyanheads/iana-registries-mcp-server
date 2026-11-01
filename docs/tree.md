@@ -1,6 +1,6 @@
 # iana-registries-mcp-server - Directory Structure
 
-Generated on: 2026-11-01 03:41:14
+Generated on: 2026-11-01 03:50:28
 
 ```text
 iana-registries-mcp-server/
@@ -26,6 +26,7 @@ iana-registries-mcp-server/
 ├── changelog/
 │   ├── 0.1.x/
 │   ├── 0.2.x/
+│   ├── 0.3.x/
 │   └── template.md
 ├── docs/
 │   └── design.md
