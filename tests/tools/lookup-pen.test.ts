@@ -258,36 +258,41 @@ describe('iana_lookup_pen: OID input', () => {
     ])
       expect(pattern.test(pen)).toBe(true);
   });
-  it('PEN input timing stays bounded across long raw inputs', () => {
-    const schema = z.toJSONSchema(lookupPen.input, { io: 'input' });
-    const penSchema = schema.properties?.pen;
-    if (!penSchema || typeof penSchema === 'boolean' || typeof penSchema.pattern !== 'string')
-      throw new Error('PEN input schema must advertise a pattern.');
-    const pattern = new RegExp(penSchema.pattern);
-    const shapes = [
-      (n: number) => '9'.repeat(n),
-      (n: number) => 'iso.'.repeat(Math.ceil(n / 4)),
-      (n: number) => `${'§1 x'.repeat(Math.ceil(n / 4))}\ny`,
-      (n: number) => `${'  \r\n'.repeat(Math.ceil(n / 4))}x`,
-      (n: number) => `${' '.repeat(n)}x`,
-    ];
-    for (const shape of shapes) {
-      let firstCpu = 0;
-      for (let size = 5_000; size <= 320_000; size *= 2) {
-        const input = shape(size);
-        for (let i = 0; i < 20; i++) pattern.test(input);
-        const before = process.threadCpuUsage();
-        for (let i = 0; i < 100; i++) {
-          expect(pattern.test(input)).toBe(false);
-          expect(lookupPen.input.shape.pen.safeParse(input).success).toBe(false);
-        }
-        const used = process.threadCpuUsage(before);
-        const cpu = used.user + used.system;
-        expect(cpu).toBeLessThan(1_000_000);
-        if (size === 5_000) firstCpu = cpu;
-        if (size === 320_000) expect(cpu / Math.max(firstCpu, 1)).toBeLessThan(256);
+  describe.each([
+    ['decimal', (n: number) => '9'.repeat(n)],
+    ['OID prefix', (n: number) => 'iso.'.repeat(Math.ceil(n / 4))],
+    ['trailing line break', (n: number) => `${'§1 x'.repeat(Math.ceil(n / 4))}\ny`],
+    ['repeated line breaks', (n: number) => `${'  \r\n'.repeat(Math.ceil(n / 4))}x`],
+    ['leading space', (n: number) => `${' '.repeat(n)}x`],
+  ] as const)('PEN input CPU time for %s', (_label, shape) => {
+    const repetitions = 10;
+    function measure(pattern: RegExp, size: number): number {
+      const input = shape(size);
+      for (let i = 0; i < 20; i++) pattern.test(input);
+      const before = process.threadCpuUsage();
+      let accepted = 0;
+      for (let i = 0; i < repetitions; i++) {
+        if (pattern.test(input)) accepted++;
+        if (lookupPen.input.shape.pen.safeParse(input).success) accepted++;
       }
+      const used = process.threadCpuUsage(before);
+      expect(accepted).toBe(0);
+      return (used.user + used.system) / repetitions;
     }
+    it.each([5_000, 10_000, 20_000, 40_000, 80_000, 160_000, 320_000])(
+      'bounds a %i-character input',
+      (size) => {
+        const schema = z.toJSONSchema(lookupPen.input, { io: 'input' });
+        const penSchema = schema.properties?.pen;
+        if (!penSchema || typeof penSchema === 'boolean' || typeof penSchema.pattern !== 'string')
+          throw new Error('PEN input schema must advertise a pattern.');
+        const pattern = new RegExp(penSchema.pattern);
+        const firstCpu = size === 320_000 ? measure(pattern, 5_000) : undefined;
+        const cpu = measure(pattern, size);
+        expect(cpu).toBeLessThan(10_000);
+        if (firstCpu !== undefined) expect(cpu / Math.max(firstCpu, 1)).toBeLessThan(256);
+      },
+    );
   });
   it('keeps malformed syntax recovery readable without exposing a regex', async () => {
     const s = boot();

@@ -345,11 +345,12 @@ describe('linear-time scanning', () => {
           entryRow({ href: '/assignments/a', title: 'T', procedure: `${'; '.repeat(50_000)}x` }),
         ),
     ],
-  ])('parses %s in under 250 ms', (_label, build) => {
+  ])('parses %s in under 250 ms of thread CPU time', (_label, build) => {
     const html = build();
-    const started = performance.now();
+    const started = process.threadCpuUsage();
     parseProtocolIndex(html);
-    expect(performance.now() - started).toBeLessThan(250);
+    const used = process.threadCpuUsage(started);
+    expect((used.user + used.system) / 1_000).toBeLessThan(250);
   });
 
   it('still reads the title link and procedure from rows built for the timing cases', () => {
