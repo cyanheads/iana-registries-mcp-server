@@ -209,15 +209,15 @@ it('matches repeated aliases and keeps the original joined display', async () =>
 });
 
 it.each([
-  ['rtsp-parameters', 'name', 'PLAY', 'PLAY [2]'],
-  ['sip-parameters', 'value', 'foo', 'foo [2]'],
-  ['ppp-numbers', 'name', 'Example', 'Example [2]'],
-  ['ldap-parameters', 'name', 'lang- (See 1)', 'lang- (See [1])'],
-] as const)('matches note spellings in %s', async (id, field, value, display) => {
+  ['rtsp-parameters', 'name', 'PLAY', 'PLAY [2]', String.raw`PLAY \[2\]`],
+  ['sip-parameters', 'value', 'foo', 'foo [2]', String.raw`foo \[2\]`],
+  ['ppp-numbers', 'name', 'Example', 'Example [2]', String.raw`Example \[2\]`],
+  ['ldap-parameters', 'name', 'lang- (See 1)', 'lang- (See [1])', String.raw`lang- (See \[1\])`],
+] as const)('matches note spellings in %s', async (id, field, value, display, markdown) => {
   serve(id, recordXml({ [field]: display.replace(/\[(\d)\]/, '<xref type="note" data="$1"/>') }));
   const hit = await call(id, { value, field });
   expect(values(hit)).toEqual([display]);
-  expect(hit.text).toContain(display.replace(/([[\]])/g, '\\$1'));
+  expect(hit.text).toContain(markdown);
 });
 
 it('routes empty pointer tables using only the selected notes and skips their own IDs', async () => {
