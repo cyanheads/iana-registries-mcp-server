@@ -128,9 +128,11 @@ Official IANA protocol registries plus RFC and Internet-Draft status. Look up po
 - A `registry` id or `iana.org/assignments` URL, optional `subregistry`, and filters `value` (exact match on the key column, or on the column `field` names) and `contains` (words in any field, records with an equal field first)
 - `value` supports exact integers, inclusive signed decimal ranges (`a-b`, `a to b`), and strict `less than` / `greater than` bounds without precision loss. A single `0x` token also compares with decimal cells and established bare-hex columns (EtherType `type_hex`, PPP protocol `value`); bare decimal input never gains hexadecimal meaning
 - Hex byte sequences preserve width across compact, comma, space, and brace forms, including TLS byte ranges and wildcards: `0x0013` matches `0x00,0x13`, while `0x13` does not. An implicit key's range-only match yields to an exact alternate-column hit by returning a miss with a `field` hint; explicit `field` selection stays authoritative
-- A `value` that misses names the other columns holding it, with their row counts, so `field` recovers a lookup by mnemonic or service name; a hit says when rows without a key cell hold the value too
+- In IANA address tables, `value` can be an IPv4 or IPv6 address or prefix. Covering blocks appear most specific first, including across pages. For example, `192.0.0.1` in `iana-ipv4-special-registry` returns both the `/29` and the enclosing `/24`.
+- A single alias in a repeated XML element matches its row. Footnoted keys match with or without the trailing note marker. If `value` misses, the notice can name a matching column or suggest a `contains` search and give the number of rows per column.
 - Pages whole records by `cursor` / `next_cursor` (pages after the first carry `offset`) within the effective `limit` (at most 100, default 25); field text and metadata lists are returned whole, preserving paragraph boundaries and artwork spacing
 - A registry with several sub-registries and none chosen returns `subregistries[]` instead of records; a table that nests tables lists them in `subregistries[]` on its first page, and a sub-registry read carries the registry's own notes and footnotes in `registry_notes[]`
+- Empty pointer tables name the registries referenced by their notes and the tools that read them. Registration templates appear as links in each record’s `references`, alongside its original `fields.file` path.
 - Failures carry `unknown_registry`, `unknown_subregistry`, `unknown_field`, `non_xml_registry`, `invalid_cursor`, or `cursor_mismatch`
 
 ## Features
@@ -147,7 +149,7 @@ IANA-specific:
 
 Agent-friendly output:
 
-- Misses are results, not errors: a lookup that finds nothing returns `found: false` with a `notice` naming the next step, an unknown RFC or draft returns `found: false` with `guidance`, and an invalid language tag returns `valid: false` with its `issues[]`. A miss means IANA has no registration, not that a value is unused in practice
+- A generic registry miss means no rows matched the selected table and filters. Follow any column or token-search hint before concluding an identifier is unregistered. Curated lookup misses carry a `notice`, unknown documents carry `guidance`, and invalid language tags carry `issues[]`.
 - Uniform lookup contract: every lookup takes exactly one mode key and fails `mode_required` otherwise; positive safe-integer `limit` values up to 1,000,000 clamp to 100 (default 25), or 50 for `iana_search_registries` (default 15). Clamped calls disclose `requested_limit` and `effective_limit` on both surfaces, including exact and empty modes. List modes (`keyword`, `organization`, `description`) page with `offset` and return `next_offset`, `totalCount`, `shown`, and `truncated`
 - List-mode `found` describes the full match set, even on an empty past-end page; port searches require a named service after transport filtering, and PEN organization searches require an assigned entry
 - Provenance on every registry response: `source` carries the registry file, `registry_updated`, `fetched_at`, and `stale`
@@ -195,11 +197,13 @@ The server reads no environment variables of its own. These framework settings a
 | `MCP_TRANSPORT_TYPE` | Transport: `stdio` or `http`. | `stdio` |
 | `MCP_HTTP_PORT` | HTTP server port. | `3010` |
 | `MCP_HTTP_HOST` | HTTP server host. | `127.0.0.1` |
-| `MCP_HTTP_ENDPOINT_PATH` | HTTP endpoint path. | `/mcp` |
+| `MCP_HTTP_ENDPOINT_PATH` | HTTP route path. A missing leading slash is added. Use `MCP_PUBLIC_URL` for the public origin. | `/mcp` |
 | `MCP_SESSION_MODE` | HTTP session mode: `stateless`, `stateful`, or `auto`. | `stateless` |
 | `MCP_AUTH_MODE` | Authentication: `none`, `jwt`, or `oauth`. | `none` |
+| `MCP_JWT_EXPECTED_AUDIENCE` | Required JWT audience. Leaving it unset accepts any audience and logs a startup warning in JWT mode. | — |
+| `MCP_JWT_EXPECTED_ISSUER` | Required JWT issuer. Set alongside the expected audience. | — |
 | `MCP_LOG_LEVEL` | Log level (`debug`, `info`, `warning`, `error`, etc.). | `info` |
-| `LOGS_DIR` | Directory for log files (Node.js only). | `<app-root>/logs` |
+| `LOGS_DIR` | Directory for log files (Node.js only). Relative paths resolve from the server package. | `<app-root>/logs` |
 | `STORAGE_PROVIDER_TYPE` | Storage backend: `in-memory`, `filesystem`, `supabase`, `cloudflare-kv/r2/d1`. | `in-memory` |
 | `OTEL_ENABLED` | Enable [OpenTelemetry](https://github.com/cyanheads/mcp-ts-core/tree/main/docs/telemetry). | `false` |
 
@@ -209,7 +213,7 @@ See [`.env.example`](./.env.example) for the full list of framework overrides.
 
 ### Prerequisites
 
-- [Bun v1.4.0](https://bun.sh/) or higher (or Node.js v24+).
+- [Bun v1.4.4](https://bun.sh/) or higher (or Node.js v24+).
 - No API key or account: IANA, the RFC Editor, and the IETF Datatracker are all keyless.
 
 ### Installation

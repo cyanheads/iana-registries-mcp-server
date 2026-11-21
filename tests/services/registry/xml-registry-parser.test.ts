@@ -151,6 +151,16 @@ describe('sub-registries', () => {
 });
 
 describe('notes, footnotes and ranges', () => {
+  it('extracts distinct registry xrefs from each table’s own notes in document order', () => {
+    const model = parse(
+      '<registry id="root"><title>t</title><note><xref type="registry" data="root-target"/></note><registry id="outer"><registry id="inner"><note><paragraph>See <xref type="registry" data="one"/> and <xref type="registry" data="two"/>.</paragraph><contact><xref type="registry" data="private"/></contact></note><note><xref type="registry" data="one"/><xref type="rfc" data="rfc1234"/></note></registry></registry></registry>',
+    );
+    expect(model.root.noteRegistryTargets).toEqual(['root-target']);
+    expect(model.subregistries[0]).not.toHaveProperty('noteRegistryTargets');
+    expect(model.subregistries[1]?.noteRegistryTargets).toEqual(['one', 'two']);
+    expect(model.subregistries[1]?.notes[0]).toEqual({ text: 'See one and two.' });
+  });
+
   const nested = parse(NESTED_XML);
   const alpha = nested.subregistries[0];
 
@@ -212,10 +222,89 @@ describe('notes, footnotes and ranges', () => {
 });
 
 describe('records', () => {
+  it('brackets inline note anchors and preserves trailing bare and legacy alternatives', () => {
+    const record = only(
+      withRecord(
+        '<value>192.0.0.0/24 <xref type="note" data="2"/></value><keyword>lang- (See <xref type="note" data="1"/>)</keyword><other>literal [3] and 200</other><draft>Value <xref type="rfc" data="rfc1234"/></draft>',
+      ),
+    );
+    expect(record.fields).toEqual({
+      value: '192.0.0.0/24 [2]',
+      keyword: 'lang- (See [1])',
+      other: 'literal [3] and 200',
+      draft: 'Value RFC 1234',
+    });
+    expect(record.comparisonValues).toEqual({
+      value: ['192.0.0.0/24 2', '192.0.0.0/24'],
+      keyword: ['lang- (See 1)'],
+    });
+  });
+
+  it('compares each repeated element and preserves the legacy spelling of the joined cell', () => {
+    const record = only(
+      withRecord(
+        '<value>4</value><alias>one<br/>two <xref type="note" data="1"/></alias><alias>contact@example.org</alias><alias> </alias>',
+      ),
+    );
+    expect(record.fields.alias).toBe('one\ntwo [1]\n[email removed]');
+    expect(record.comparisonValues?.alias).toEqual([
+      'one\ntwo 1\n[email removed]',
+      'one\ntwo [1]',
+      'one\ntwo 1',
+      'one\ntwo',
+      '[email removed]',
+    ]);
+    expect(record.comparisonValues).not.toHaveProperty('value');
+  });
+
+  it('resolves template file pointers independently of regular references and fields', () => {
+    const model = parse(
+      '<registry id="media-types"><title>t</title><registry id="a"><registry id="b"><record><value>4</value><file type="template" name="image/x-emf">image/emf</file><file type="template">application/atom+xml</file><file type="template" registry="other">prov/acd</file><file type="template">//example.org/template</file><file type="template">https://example.org/other</file><file type="template">mailto:person@example.org</file><file type="template">https://person@example.org</file><file type="template">javascript:alert(1)</file><file type="legacy">legacy</file><xref type="rfc" data="rfc1234"/></record></registry></registry></registry>',
+    );
+    const record = model.subregistries[1]?.records[0];
+    const urls = [
+      'https://www.iana.org/assignments/media-types/image/emf',
+      'https://www.iana.org/assignments/media-types/application/atom%2Bxml',
+      'https://www.iana.org/assignments/other/prov/acd',
+      'https://example.org/template',
+      'https://example.org/other',
+    ];
+    expect(record?.templateReferences).toEqual(
+      urls.map((url) => ({ type: 'uri', id: url, url, label: 'template' })),
+    );
+    expect(record?.references.map(({ id }) => id)).toEqual(['RFC 1234']);
+    expect(record?.fieldAttributes?.file?.name).toBe('image/x-emf');
+    expect(record?.fields.file).toContain('image/emf\napplication/atom+xml\nprov/acd');
+    expect(record?.searchText).not.toContain(' assignments ');
+  });
+
+  it('joins repeated cells while preserving an element’s own line breaks and scrubbing non-key text', () => {
+    const record = only(
+      withRecord(
+        '<value>identifier@example.org</value><alias>one<br/>two</alias><alias>contact@example.org</alias><alias> </alias>',
+      ),
+    );
+    expect(record.value).toBe('identifier@example.org');
+    expect(record.fields.alias).toBe('one\ntwo\n[email removed]');
+  });
+
+  it('keeps repeated file text and only the first file attributes in the record fields', () => {
+    const record = only(
+      withRecord(
+        '<value>1</value><file type="template" name="alias">image/emf</file><file type="template">other</file><xref type="rfc" data="rfc1234"/>',
+      ),
+    );
+    expect(record.fields.file).toBe('image/emf\nother');
+    expect(record.fieldAttributes?.file).toEqual({ type: 'template', name: 'alias' });
+    expect(record.references.map(({ id }) => id)).toEqual(['RFC 1234']);
+  });
+
   it('flattens child elements to fields keyed by element name, in record order', () => {
     const record = parse(HTTP_STATUS_XML).subregistries[0]?.records[0];
     expect(record?.fields).toEqual({ value: '200', description: 'OK' });
     expect(Object.keys(record?.fields ?? {})).toEqual(['value', 'description']);
+    expect(record).not.toHaveProperty('comparisonValues');
+    expect(record).not.toHaveProperty('templateReferences');
   });
 
   it('takes the key column from value, else number, else the first field', () => {

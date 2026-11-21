@@ -17,12 +17,12 @@ import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { decodeCursor, encodeCursor } from '@cyanheads/mcp-ts-core/utils';
 import {
   getRegistryStore,
+  LANGUAGE_EXTENSIONS_URL,
   LANGUAGE_REGISTRY_URL,
   PEN_URL,
   type RegistryStore,
 } from '@/services/registry/registry-store.js';
 import { tablesOf } from '@/services/registry/registry-tables.js';
-import { compileQuery, matchesQuery, normalizeForSearch } from '@/services/registry/search-text.js';
 import type {
   Loaded,
   ProtocolIndex,
@@ -30,15 +30,8 @@ import type {
   RegistryTable,
   XmlRegistry,
 } from '@/services/registry/types.js';
-import { valueMatcher } from '@/services/registry/value-matcher.js';
 import { type CallBudget, startCallBudget } from '@/services/upstream/call-budget.js';
-import {
-  discloseList,
-  echo,
-  exactFirst,
-  initializeList,
-  listEnrichment,
-} from '../shared/list-enrichment.js';
+import { discloseList, echo, initializeList, listEnrichment } from '../shared/list-enrichment.js';
 import {
   datesLine,
   inline,
@@ -48,6 +41,7 @@ import {
   referenceLines,
   sourceLines,
 } from '../shared/markdown.js';
+import { type Holder, matchRegistryRecords } from '../shared/registry-record-match.js';
 import {
   blankAsUnset,
   limitInput,
@@ -63,10 +57,19 @@ const REGISTRY_URL =
   /^https?:\/\/(?:www\.)?iana\.org\/assignments\/([A-Za-z0-9_][A-Za-z0-9_.-]{0,63})(?:\/[^\s#]*)?(?:#([A-Za-z0-9_][A-Za-z0-9_.-]{0,99}))?$/;
 
 /** Ids IANA publishes only as plain text, each read by a curated tool. A `Map`, so a caller's id never reaches an object prototype. */
-const PLAIN_TEXT_REGISTRIES: ReadonlyMap<string, { file: string; tool: string }> = new Map([
-  ['enterprise-numbers', { file: PEN_URL, tool: 'iana_lookup_pen' }],
-  ['language-subtag-registry', { file: LANGUAGE_REGISTRY_URL, tool: 'iana_lookup_language_tag' }],
-]);
+const PLAIN_TEXT_REGISTRIES: ReadonlyMap<string, { file: string; tool: string; example?: string }> =
+  new Map([
+    ['enterprise-numbers', { file: PEN_URL, tool: 'iana_lookup_pen' }],
+    ['language-subtag-registry', { file: LANGUAGE_REGISTRY_URL, tool: 'iana_lookup_language_tag' }],
+    [
+      'language-tag-extensions-registry',
+      {
+        file: LANGUAGE_EXTENSIONS_URL,
+        tool: 'iana_lookup_language_tag',
+        example: ' with tag "en-u-ca-gregory"',
+      },
+    ],
+  ]);
 
 /** The registry date a cursor may carry; any other `u` is ignored. */
 const CURSOR_DATE = /^\d{4}-\d{2}-\d{2}$/;
@@ -80,11 +83,16 @@ function parseRegistryInput(registry: string): { fragment?: string; id: string }
 
 /** A complete record, keyed by its table's key column when present. */
 function toRecordOutput(entry: RegistryRecord, valueField: string | undefined) {
-  const key = valueField === undefined ? undefined : entry.fields[valueField];
+  const key =
+    valueField !== undefined && Object.hasOwn(entry.fields, valueField)
+      ? entry.fields[valueField]
+      : undefined;
   return {
     ...(key !== undefined ? { value: key } : {}),
     fields: entry.fields,
-    references: entry.references,
+    references: entry.templateReferences
+      ? [...entry.references, ...entry.templateReferences]
+      : entry.references,
     ...(entry.registered ? { registered: entry.registered } : {}),
     ...(entry.updated ? { updated: entry.updated } : {}),
   };
@@ -136,37 +144,15 @@ function listWords(words: readonly string[]): string {
 /** Every name in a recovery hint. */
 const named = (names: readonly string[]) => names.map(inline).join(', ');
 
-/** A column holding a looked-up value, and in how many rows. */
-interface Holder {
-  name: string;
-  rows: number;
-}
-
-/**
- * The listed columns other than `skip` with a cell `holds` accepts in `rows`,
- * each with its row count, most rows first (column order on ties).
- */
-function holdersOf(
-  columns: readonly { name: string; match: (cell: string | undefined) => boolean }[],
-  rows: readonly RegistryRecord[],
-  skip: string | undefined,
-  holds: (record: RegistryRecord) => boolean,
-): Holder[] {
-  return columns
-    .filter(({ name }) => name !== skip)
-    .map(({ name, match }) => ({
-      name,
-      rows: rows.filter((row) => match(row.fields[name]) && holds(row)).length,
-    }))
-    .filter((holder) => holder.rows > 0)
-    .sort((a, b) => b.rows - a.rows);
-}
+/** Column names and their distinct matching row counts. */
+const countedColumns = (holders: readonly Holder[]) =>
+  listWords(
+    holders.map(({ name, rows }) => `${inline(name)} (${rows} ${rows === 1 ? 'row' : 'rows'})`),
+  );
 
 /** `{noun} a (2 rows) holds "v"` or `{noun}s a (2 rows) and b (1 row) hold "v"`. */
 function holding(holders: readonly Holder[], value: string, noun: 'Column' | 'column'): string {
-  const names = listWords(
-    holders.map(({ name, rows }) => `${inline(name)} (${rows} ${rows === 1 ? 'row' : 'rows'})`),
-  );
+  const names = countedColumns(holders);
   return holders.length === 1
     ? `${noun} ${names} holds "${echo(value)}"`
     : `${noun}s ${names} hold "${echo(value)}"`;
@@ -185,6 +171,20 @@ const holdersHint = (holders: readonly Holder[], value: string) =>
 /** The hit notice for rows a key match skipped because they have no `keyName` cell. */
 const keylessHint = (holders: readonly Holder[], keyName: string, value: string) =>
   `Rows with no ${keyName} cell are left out of a key match, and ${holding(holders, value, 'column')} in them; call again with field set to ${fieldFor(holders)} to include them.`;
+
+/** Describe the related registries an empty table names and how to read them. */
+function noteTargetsHint(table: RegistryTable): string | undefined {
+  const selected = table.id.toLowerCase();
+  const targets = table.noteRegistryTargets?.filter((target) => target.toLowerCase() !== selected);
+  if (!targets?.length) return;
+  const routes = targets.map((id) => {
+    const route = PLAIN_TEXT_REGISTRIES.get(id.toLowerCase());
+    return route
+      ? `${inline(id)} (call ${route.tool}${route.example ?? ''})`
+      : `${inline(id)} (try iana_get_registry_records with registry set to "${inline(id)}")`;
+  });
+  return `Its notes point to ${listWords(routes)}.`;
+}
 
 /** True for the framework's `invalid_cursor` rejection, whose hint names `nextCursor`, not this tool's `next_cursor`. */
 function isInvalidCursor(error: unknown): boolean {
@@ -278,7 +278,7 @@ const NoteSchema = z
 export const getRegistryRecords = tool('iana_get_registry_records', {
   title: 'Read IANA registry records',
   description:
-    'Read records from any IANA XML registry by id, e.g. registry "tls-parameters" with subregistry "tls-parameters-4" (TLS Cipher Suites), "protocol-numbers", "http-methods", or "cbor-tags"; an iana.org/assignments URL also works. Filter with `value` on the key column or the column `field` names: signed decimal points match exact cells, inclusive ranges and strict open bounds; scalar 0x points also compare with decimal cells and established bare-hex columns. Two-byte 0x points match byte-pair ranges and wildcards with their width preserved. An implicit range-only key match yields a miss and a field pointer when another column holds the value exactly. Filter with `contains` for words in any field; records with an equal field come first. When a registry has several sub-registries and none is given, the response lists them instead of records; a table that nests tables lists them too. Field names are the registry\'s XML element names (e.g. "rec" is the Recommended column). Large registries page through `cursor`. Find ids with iana_search_registries.',
+    'Read records from any IANA XML registry by id, e.g. registry "tls-parameters" with subregistry "tls-parameters-4" (TLS Cipher Suites), "protocol-numbers", "http-methods", or "cbor-tags"; an iana.org/assignments URL also works. Filter with `value` on the key column or the column `field` names: signed decimal points match exact cells, inclusive ranges and strict open bounds; scalar 0x points also compare with decimal cells and established bare-hex columns. Two-byte 0x points match byte-pair ranges and wildcards with their width preserved. Address fields compare IPv4 and IPv6 points and prefixes with covering blocks, narrowest first. An implicit range-only key match yields a miss and a field pointer when another column holds the value exactly. Filter with `contains` for words in any field; records with an equal field come first. When a registry has several sub-registries and none is given, the response lists them instead of records; a table that nests tables lists them too. Field names are the registry\'s XML element names (e.g. "rec" is the Recommended column). Large registries page through `cursor`. Find ids with iana_search_registries.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
     registry: z
@@ -298,13 +298,13 @@ export const getRegistryRecords = tool('iana_get_registry_records', {
       'Sub-registry id, case-insensitive, e.g. "tls-parameters-4". Omit to read the only sub-registry, or to list them when there are several.',
     ),
     value: blankAsUnset(z.string().max(100).optional()).describe(
-      'Match the key column named by value_field (value, else number, else first column), or field when set; case and whitespace are ignored. Signed decimal points compare without precision loss with exact integers, inclusive a-b or a to b ranges, and strict less than / greater than bounds. Decimal input never gains hexadecimal meaning. One 0x token also compares numerically with decimal cells and ranges; bare hex is recognized only in ieee-802-numbers-1/type_hex and ppp-numbers-2/value. Hex byte forms keep their written width: 0x1301, {0x13,0x01}, and 0x13 0x01 find 0x13,0x01; 0x0013 finds 0x00,0x13 but 0x13 does not. Two-byte points also match 0xHH,0xLL-MM, 0xHH,* and 0xAA-BB,* rows. Scalar hex ranges such as 0x11-0xff and literal range equality remain supported. An implicit range-only match with an exact alternate-column hit returns a miss naming field; explicit field selection is authoritative.',
+      'Match the key column named by value_field (value, else number, else first column), or field when set; case and whitespace are ignored. Signed decimal points compare without precision loss with exact integers, inclusive a-b or a to b ranges, and strict less than / greater than bounds. Decimal input never gains hexadecimal meaning. One 0x token also compares numerically with decimal cells and ranges; bare hex is recognized only in ieee-802-numbers-1/type_hex and ppp-numbers-2/value. Hex byte forms keep their written width: 0x1301, {0x13,0x01}, and 0x13 0x01 find 0x13,0x01; 0x0013 finds 0x00,0x13 but 0x13 does not. Two-byte points also match 0xHH,0xLL-MM, 0xHH,* and 0xAA-BB,* rows. Scalar hex ranges such as 0x11-0xff and literal range equality remain supported. In address, addr, and prefix columns, an IPv4 or IPv6 point or whole prefix can match a containing block. Repeated XML field elements can match individually. An implicit range-only match with an exact alternate-column hit returns a miss naming field; explicit field selection is authoritative.',
     ),
     field: blankAsUnset(z.string().max(100).optional()).describe(
       'Column for value to match instead of the key column, case-insensitive, one of the names in columns: e.g. "type" for a DNS RR type mnemonic, or "name" for every row of a service name. Ignored without value.',
     ),
     contains: blankAsUnset(searchWords().optional()).describe(
-      'Words matched as whole tokens against every field and reference id, e.g. "chacha20". Records with a field equal to the words come first.',
+      'Words matched as whole tokens against every field and reference id, e.g. "chacha20". Outside address lookups, records with a field equal to the words come first.',
     ),
     limit: limitInput(100, 25),
     cursor: blankAsUnset(z.string().max(1_000).optional()).describe(
@@ -373,7 +373,9 @@ export const getRegistryRecords = tool('iana_get_registry_records', {
             fields: z
               .record(z.string(), z.string())
               .describe('Whole values keyed by XML element name.'),
-            references: z.array(ReferenceSchema).describe('References on the record.'),
+            references: z
+              .array(ReferenceSchema)
+              .describe('Record references and registration template links.'),
             registered: z.string().optional().describe('Registration date.'),
             updated: z.string().optional().describe('Last-updated date.'),
             cut_fields: z
@@ -384,7 +386,7 @@ export const getRegistryRecords = tool('iana_get_registry_records', {
           .describe('One registry record.'),
       )
       .describe(
-        'Whole records in registry order (with contains, records with a field equal to the words first), up to limit.',
+        'Whole records up to limit. Address matches are ordered by the smallest covering block, with ties in registry order. Other contains results put equal fields first. All other records stay in registry order.',
       ),
     subregistries: z
       .array(
@@ -441,7 +443,7 @@ export const getRegistryRecords = tool('iana_get_registry_records', {
       code: JsonRpcErrorCode.ValidationError,
       when: 'The registry, or the sub-registry read, holds no XML records and points at a file published separately, such as plain text or a MIB module.',
       recovery:
-        'This registry is published outside its XML; for language subtags call iana_lookup_language_tag, for enterprise numbers call iana_lookup_pen, otherwise read the file named in this error or call iana_search_registries for a related XML registry.',
+        'This registry is published outside its XML. For language subtags call iana_lookup_language_tag, for language tag extensions call it with an extension-bearing tag such as en-u-ca-gregory, and for enterprise numbers call iana_lookup_pen. Otherwise read the named file or call iana_search_registries for a related XML registry.',
       severity: 'notice',
     },
     {
@@ -505,7 +507,9 @@ export const getRegistryRecords = tool('iana_get_registry_records', {
         {
           registry: target.id,
           file: plain.file,
-          recovery: { hint: `Call ${plain.tool} instead; it reads ${plain.file}.` },
+          recovery: {
+            hint: `Call ${plain.tool}${plain.example ?? ''} instead; it reads ${plain.file}.`,
+          },
         },
       );
     }
@@ -659,62 +663,15 @@ export const getRegistryRecords = tool('iana_get_registry_records', {
 
     const valueField = keyColumn(table);
     const column = field ?? valueField;
-    const bareHexColumn = (name: string | undefined) =>
-      (table.id === 'ieee-802-numbers-1' && name === 'type_hex') ||
-      (table.id === 'ppp-numbers-2' && name === 'value');
-    const matchValue =
-      input.value === undefined ? undefined : valueMatcher(input.value, bareHexColumn(column));
-    const exactValue =
-      input.value === undefined
-        ? undefined
-        : valueMatcher(input.value, bareHexColumn(column), false);
-    const query = input.contains === undefined ? undefined : compileQuery(input.contains);
-    const passesContains = (record: RegistryRecord) =>
-      !query || matchesQuery(record.searchText, query);
-    /** Rows with no key cell, which a key match skips; scanned for the value only after a hit. */
-    const keyless: RegistryRecord[] = [];
-    const filtered = table.records.filter((record) => {
-      if (matchValue) {
-        const cell = column === undefined ? undefined : record.fields[column];
-        if (!matchValue(cell)) {
-          if (cell === undefined && column !== undefined && field === undefined) {
-            keyless.push(record);
-          }
-          return false;
-        }
-      }
-      return passesContains(record);
-    });
-    const words = input.contains === undefined ? undefined : normalizeForSearch(input.contains);
-    let matches =
-      words === undefined
-        ? filtered
-        : exactFirst(filtered, (record) =>
-            Object.values(record.fields).some((text) => normalizeForSearch(text) === words),
-          );
-    const holdersIn = (rows: readonly RegistryRecord[], ranges = true) => {
-      if (input.value === undefined) return [];
-      const value = input.value;
-      const matchers = table.columns.map((name) => ({
-        name,
-        match: valueMatcher(value, bareHexColumn(name), ranges),
-      }));
-      return holdersOf(matchers, rows, column, passesContains);
-    };
-    /** An alternate exact cell must not silently resolve to an unrelated key range. */
-    if (
-      field === undefined &&
-      input.value !== undefined &&
-      matches.length > 0 &&
-      !matches.some((record) =>
-        exactValue?.(column === undefined ? undefined : record.fields[column]),
-      )
-    ) {
-      const alternate = holdersIn(table.records, false);
-      if (alternate.length > 0) matches = [];
-    }
-    const holders = matches.length === 0 ? holdersIn(table.records) : [];
-    const keylessHolders = matches.length > 0 && keyless.length > 0 ? holdersIn(keyless) : [];
+    const { matches, holders, keylessHolders, tokenHolders, addressLookup } = matchRegistryRecords(
+      table,
+      registryId,
+      column,
+      field !== undefined,
+      input.value,
+      input.contains,
+      firstPage,
+    );
 
     const records: RecordOutput[] = matches
       .slice(offset, offset + input.limit)
@@ -734,7 +691,10 @@ export const getRegistryRecords = tool('iana_get_registry_records', {
     const columnName = inline(column === undefined ? 'key' : column);
     const missed = listWords(
       [
-        input.value !== undefined && `has ${columnName} "${echo(input.value)}"`,
+        input.value !== undefined &&
+          (addressLookup
+            ? `has a covering block for "${echo(input.value)}" in ${columnName}`
+            : `has ${columnName} "${echo(input.value)}"`),
         input.contains !== undefined && `contains "${echo(input.contains)}"`,
       ].filter((phrase): phrase is string => typeof phrase === 'string'),
     );
@@ -743,7 +703,9 @@ export const getRegistryRecords = tool('iana_get_registry_records', {
         ? 'Try fewer or different words.'
         : holders.length > 0
           ? holdersHint(holders, input.value)
-          : `Drop ${input.contains === undefined ? 'value' : 'a filter'}, or check the column names listed in columns.`;
+          : tokenHolders.length > 0
+            ? `Whole tokens match in ${countedColumns(tokenHolders)}; replace value with contains and omit field and cursor.`
+            : `Drop ${input.contains === undefined ? 'value' : 'a filter'}, or check the column names listed in columns.`;
     const keylessNotice =
       input.value !== undefined &&
       keylessHolders.length > 0 &&
@@ -763,6 +725,7 @@ export const getRegistryRecords = tool('iana_get_registry_records', {
           (model.recordCount === 0
             ? `${inline(tableId)} publishes no records in its XML.`
             : `${inline(tableId)} holds no records.`),
+        table.records.length === 0 && noteTargetsHint(table),
         table.records.length === 0 &&
           nested.length > 0 &&
           `It nests ${nested.length} ${nested.length === 1 ? 'table' : 'tables'}; call again with subregistry set to one of the listed ids.`,
@@ -885,7 +848,7 @@ export const getRegistryRecords = tool('iana_get_registry_records', {
       if (record.cut_fields)
         lines.push(`**Cut fields:** ${record.cut_fields.map(inline).join(', ')}`);
       if (record.references.length > 0) {
-        lines.push('**References:**', ...referenceLines(record.references));
+        lines.push('**References:**', ...referenceLines(record.references, '', true));
       }
     });
     if (result.next_cursor) lines.push('', `**Next cursor:** \`${result.next_cursor}\``);

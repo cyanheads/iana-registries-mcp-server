@@ -1,6 +1,6 @@
 # iana-registries-mcp-server - Directory Structure
 
-Generated on: 2026-11-01 03:50:28
+Generated on: 2026-11-21 17:49:11
 
 ```text
 iana-registries-mcp-server/
@@ -158,6 +158,7 @@ iana-registries-mcp-server/
 │   │       └── shared/
 │   │           ├── list-enrichment.ts
 │   │           ├── markdown.ts
+│   │           ├── registry-record-match.ts
 │   │           └── schemas.ts
 │   ├── services/
 │   │   ├── ietf/
@@ -167,6 +168,7 @@ iana-registries-mcp-server/
 │   │   │   ├── media-template-reader.ts
 │   │   │   └── template-statements.ts
 │   │   ├── registry/
+│   │   │   ├── address-matcher.ts
 │   │   │   ├── index-search.ts
 │   │   │   ├── language-extensions-parser.ts
 │   │   │   ├── language-registry-parser.ts
@@ -207,6 +209,7 @@ iana-registries-mcp-server/
 │   │   │   ├── media-template-reader.test.ts
 │   │   │   └── template-statements.test.ts
 │   │   ├── registry/
+│   │   │   ├── address-matcher.test.ts
 │   │   │   ├── index-search.test.ts
 │   │   │   ├── language-extensions-parser.test.ts
 │   │   │   ├── language-registry-parser.test.ts
@@ -242,6 +245,7 @@ iana-registries-mcp-server/
 │       ├── lookup-port.test.ts
 │       ├── lookup-uri-scheme.test.ts
 │       ├── markdown.test.ts
+│       ├── registry-record-recovery.test.ts
 │       ├── schemas.test.ts
 │       └── search-registries.test.ts
 ├── .dockerignore

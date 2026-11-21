@@ -4,7 +4,7 @@ description: Trace protocol assignments to their defining documents with iana_* 
 license: Apache-2.0
 metadata:
   author: "cyanheads"
-  version: "1.0"
+  version: "1.1"
 ---
 
 ## Scope
@@ -31,6 +31,10 @@ For a question such as “What does this TLS code point name, and is its specifi
 ## Workflows
 
 **Known assignment, unfamiliar specification.** Start with the curated lookup when it covers the assignment. Follow the returned document references through `iana_get_rfc_status`; a registration can remain present while its defining document has been updated or obsoleted.
+
+**Identifier missing from a familiar table.** Check the miss notice before reporting an identifier as unregistered. For an ALPN wire identifier such as `h2`, select registry `tls-extensiontype-values` and subregistry `alpn-protocol-ids`. The key is the protocol name. If the notice identifies `description` as containing the wire identifier, drop `value` and retry with `contains`.
+
+**Special-use IP address.** Read the IPv4 or IPv6 special-purpose registry with the address as `value`. An address can have several covering registrations. Read their names, scope and footnotes, starting with the most specific block. For `192.0.0.1`, the `/29` and its enclosing `/24` have separate entries.
 
 **Standards series.** Resolve the BCP, STD, or FYI series, then look up the returned member RFCs to assess their status. The series response supplies membership, not each member's status. For the reverse question, inspect an RFC's `is_also` and resolve those series when their other members matter.
 

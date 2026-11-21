@@ -41,6 +41,8 @@ export interface RegistrationRange {
 
 /** One `<record>`, its children flattened to text by element name. */
 export interface RegistryRecord {
+  /** Additional exact-cell comparisons from repeated elements and inline note boundaries. */
+  comparisonValues?: Record<string, string[]>;
   /**
    * Attributes of field elements that carried any (first occurrence), e.g.
    * `{ file: { type: 'template', name: 'image/x-emf' } }`. Absent when none did.
@@ -62,6 +64,8 @@ export interface RegistryRecord {
    * one space on each side for whole-token matching (see `search-text.ts`).
    */
   searchText: string;
+  /** Direct registration template pointers for the generic records tool. */
+  templateReferences?: Reference[];
   /** The record's `updated` attribute. */
   updated?: string;
   /** Key column value: `<value>`, else `<number>`, else the first field. */
@@ -87,6 +91,8 @@ export interface RegistryTable {
   /** Table-level `<file>` pointers, direct or inside `<files>`, in document order. */
   files: RegistryFile[];
   id: string;
+  /** Distinct registry xref IDs from this table's own notes, in source order. */
+  noteRegistryTargets?: string[];
   notes: RegistryNote[];
   /** Id of the enclosing nested registry, for tables nested more than one level deep. */
   parentId?: string;

@@ -82,10 +82,15 @@ function cleanText(raw: string): string {
     .join('\n');
 }
 
-/** Prose fragments, literal artwork, and paragraph boundaries. */
-type TextPiece = string | { literal: string } | null;
+/** Prose fragments, record note anchors, literal artwork, and paragraph boundaries. */
+type TextPiece = string | { anchor: string } | { literal: string } | null;
 
-function collect(nodes: readonly XNode[], out: TextPiece[]): void {
+interface TextContext {
+  recordField?: true;
+  registryTarget?: (id: string) => void;
+}
+
+function collect(nodes: readonly XNode[], out: TextPiece[], context?: TextContext): void {
   for (const node of nodes) {
     const tag = tagOf(node);
     if (tag === undefined || DROPPED.has(tag)) continue;
@@ -96,7 +101,13 @@ function collect(nodes: readonly XNode[], out: TextPiece[]): void {
     if (tag === 'xref') {
       const label = flatten(childrenOf(node, tag));
       const ref = parseReference(attrsOf(node), label);
-      if (ref) out.push(inlineXref(ref, label));
+      if (!ref) continue;
+      if (ref.type === 'registry') context?.registryTarget?.(ref.id);
+      if (ref.type === 'note' && context?.recordField && (!label || label === ref.id)) {
+        out.push({ anchor: ref.id });
+      } else {
+        out.push(inlineXref(ref, label));
+      }
       continue;
     }
     if (tag === 'br') {
@@ -105,23 +116,22 @@ function collect(nodes: readonly XNode[], out: TextPiece[]): void {
     }
     if (tag === 'artwork') {
       const artwork: TextPiece[] = [];
-      collect(childrenOf(node, tag), artwork);
+      const registryTarget = context?.registryTarget;
+      collect(childrenOf(node, tag), artwork, registryTarget ? { registryTarget } : undefined);
       out.push({
-        literal: artwork
-          .map((part) => (typeof part === 'string' ? part : (part?.literal ?? '\n\n')))
-          .join(''),
+        literal: artwork.map((part) => pieceText(part) ?? '\n\n').join(''),
       });
       continue;
     }
     if (tag === 'paragraph' || tag === 't') {
       out.push(null);
-      collect(childrenOf(node, tag), out);
+      collect(childrenOf(node, tag), out, context);
       out.push(null);
       continue;
     }
     const block = BLOCKS.has(tag);
     if (block) out.push('\n');
-    collect(childrenOf(node, tag), out);
+    collect(childrenOf(node, tag), out, context);
     if (block) out.push('\n');
   }
 }
@@ -130,14 +140,19 @@ function collect(nodes: readonly XNode[], out: TextPiece[]): void {
  * Flattens mixed content to text (inline xref → its label or id, `<br/>` →
  * newline) with email-shaped tokens replaced.
  */
-function flatten(nodes: readonly XNode[]): string {
-  return scrubEmails(flattenRaw(nodes));
+function flatten(nodes: readonly XNode[], context?: TextContext): string {
+  const out: TextPiece[] = [];
+  collect(nodes, out, context);
+  return scrubEmails(renderPieces(out));
 }
 
-/** {@link flatten} without the email scrub — only for a record's key column. */
-function flattenRaw(nodes: readonly XNode[]): string {
-  const out: TextPiece[] = [];
-  collect(nodes, out);
+function pieceText(piece: TextPiece): string | undefined {
+  if (typeof piece === 'string') return piece;
+  if (piece && 'literal' in piece) return piece.literal;
+  return piece?.anchor;
+}
+
+function renderPieces(pieces: readonly TextPiece[], legacyAnchors = false): string {
   const blocks: string[] = [];
   let prose: string[] = [];
   const flush = () => {
@@ -145,8 +160,9 @@ function flattenRaw(nodes: readonly XNode[]): string {
     if (text) blocks.push(text);
     prose = [];
   };
-  for (const part of out) {
+  for (const part of pieces) {
     if (typeof part === 'string') prose.push(part);
+    else if (part && 'anchor' in part) prose.push(legacyAnchors ? part.anchor : `[${part.anchor}]`);
     else {
       flush();
       if (part?.literal) blocks.push(part.literal);
@@ -154,6 +170,33 @@ function flattenRaw(nodes: readonly XNode[]): string {
   }
   flush();
   return blocks.join('\n\n');
+}
+
+const RECORD_FIELD_CONTEXT: TextContext = { recordField: true };
+
+interface MarkedField {
+  bare: string;
+  display: string;
+  legacy: string;
+}
+
+/** Keep each cell's old spelling and remove only structurally trailing note anchors. */
+function recordField(nodes: readonly XNode[]): string | MarkedField {
+  const pieces: TextPiece[] = [];
+  collect(nodes, pieces, RECORD_FIELD_CONTEXT);
+  const display = renderPieces(pieces);
+  const lastAnchor = pieces.findLastIndex(
+    (piece) => piece !== null && typeof piece === 'object' && 'anchor' in piece,
+  );
+  if (lastAnchor < 0) return display;
+  const lastText = pieces.findLastIndex((piece) =>
+    typeof piece === 'string' ? !!piece.trim() : piece !== null && 'literal' in piece,
+  );
+  return {
+    display,
+    legacy: renderPieces(pieces, true),
+    bare: lastText < lastAnchor ? renderPieces(pieces.slice(0, lastText + 1)) : display,
+  };
 }
 
 /** Inline xref text: the label (plus the target when the label hides it), else the id. */
@@ -256,8 +299,8 @@ function referenceFrom(node: XNode): Reference | undefined {
   return parseReference(attrsOf(node), flatten(childrenOf(node, 'xref')));
 }
 
-function parseNote(node: XNode, tag: string): RegistryNote | undefined {
-  const text = flatten(childrenOf(node, tag));
+function parseNote(node: XNode, tag: string, context: TextContext): RegistryNote | undefined {
+  const text = flatten(childrenOf(node, tag), context);
   if (!text) return;
   const { anchor, title } = attrsOf(node);
   return {
@@ -287,10 +330,12 @@ function parseRange(node: XNode): RegistrationRange | undefined {
  * identifier, and some are email-shaped (the TLS exporter label
  * `TEAPbindkey@ietf.org`), so scrubbing it would replace the registration itself.
  */
-function parseRecord(node: XNode, columns: Set<string>): RegistryRecord {
+function parseRecord(node: XNode, columns: Set<string>, rootId: string): RegistryRecord {
   const raw = new Map<string, string>();
   const fieldAttributes = new Map<string, Record<string, string>>();
   const references: Reference[] = [];
+  let templateReferences: Reference[] | undefined;
+  let alternatives: Map<string, { legacy: string; occurrences: string[] }> | undefined;
 
   for (const child of childrenOf(node, 'record')) {
     const tag = tagOf(child);
@@ -300,13 +345,36 @@ function parseRecord(node: XNode, columns: Set<string>): RegistryRecord {
       if (ref) references.push(ref);
       continue;
     }
-    const text = flattenRaw(childrenOf(child, tag));
+    const cell = recordField(childrenOf(child, tag));
+    const text = typeof cell === 'string' ? cell : cell.display;
     if (!text) continue;
     const previous = raw.get(tag);
     raw.set(tag, previous === undefined ? text : `${previous}\n${text}`);
+    if (previous !== undefined || typeof cell !== 'string') {
+      alternatives ??= new Map();
+      const existing = alternatives.get(tag);
+      const legacy = typeof cell === 'string' ? cell : cell.legacy;
+      const values = typeof cell === 'string' ? [cell] : [cell.display, cell.legacy, cell.bare];
+      if (existing) {
+        existing.legacy += `\n${legacy}`;
+        existing.occurrences.push(...values);
+      } else {
+        alternatives.set(tag, {
+          legacy: previous === undefined ? legacy : `${previous}\n${legacy}`,
+          occurrences: previous === undefined ? values : [previous, ...values],
+        });
+      }
+    }
     columns.add(tag);
     const attrs = attrsOf(child);
     if (Object.keys(attrs).length > 0 && !fieldAttributes.has(tag)) fieldAttributes.set(tag, attrs);
+    if (tag === 'file' && attrs.type === 'template') {
+      const ref = templateReference(text, attrs, rootId);
+      if (ref) {
+        templateReferences ??= [];
+        templateReferences.push(ref);
+      }
+    }
   }
 
   const valueField = raw.has('value')
@@ -318,11 +386,39 @@ function parseRecord(node: XNode, columns: Set<string>): RegistryRecord {
     [...raw].map(([tag, text]) => [tag, tag === valueField ? text : scrubEmails(text)]),
   );
   const value = valueField === undefined ? undefined : fields.get(valueField);
+  let comparisonValues: Record<string, string[]> | undefined;
+  // Full-text matching retains the previous field spelling even when display changes.
+  let searchFields: string[] | undefined;
+  if (alternatives) {
+    searchFields = [];
+    for (const [tag, text] of fields) {
+      const other = alternatives.get(tag);
+      if (!other) {
+        searchFields.push(text);
+        continue;
+      }
+      const scrub = tag === valueField ? (entry: string) => entry : scrubEmails;
+      const legacy = scrub(other.legacy);
+      searchFields.push(legacy);
+      const values = new Set([legacy, ...other.occurrences.map(scrub)]);
+      values.delete(text);
+      values.delete('');
+      if (values.size > 0) {
+        comparisonValues ??= Object.create(null) as Record<string, string[]>;
+        comparisonValues[tag] = [...values];
+      }
+    }
+  }
   const { date, updated } = attrsOf(node);
   return {
     fields: Object.fromEntries(fields),
     references,
-    searchText: toSearchText(...fields.values(), ...references.map((ref) => ref.id)),
+    searchText: toSearchText(
+      ...(searchFields ?? fields.values()),
+      ...references.map((ref) => ref.id),
+    ),
+    ...(comparisonValues ? { comparisonValues } : {}),
+    ...(templateReferences ? { templateReferences } : {}),
     ...(fieldAttributes.size > 0 ? { fieldAttributes: Object.fromEntries(fieldAttributes) } : {}),
     ...(value !== undefined && valueField !== undefined ? { value, valueField } : {}),
     ...(date ? { registered: date } : {}),
@@ -341,13 +437,34 @@ const encodePath = (path: string) => path.split('/').map(encodeURIComponent).joi
 function parseFile(node: XNode, rootId: string): RegistryFile | undefined {
   const text = flatten(childrenOf(node, 'file'));
   if (!text) return;
-  const { type, registry } = attrsOf(node);
+  return resolveFile(text, attrsOf(node), rootId);
+}
+
+function resolveFile(
+  text: string,
+  { type, registry }: Record<string, string>,
+  rootId: string,
+): RegistryFile {
   let url: string;
   if (/^https?:\/\//i.test(text)) url = text;
   else if (text.startsWith('//')) url = `https:${text}`;
   else if (type === 'mib') url = `${ASSIGNMENTS}${encodePath(text)}`;
   else url = `${ASSIGNMENTS}${encodeURIComponent(registry?.trim() || rootId)}/${encodePath(text)}`;
   return { ...(type ? { type } : {}), url };
+}
+
+function templateReference(
+  text: string,
+  attrs: Record<string, string>,
+  rootId: string,
+): Reference | undefined {
+  const registry = attrs.registry ?? rootId;
+  if (scrubEmails(text) !== text || scrubEmails(registry) !== registry) return;
+  if (/^[a-z][a-z\d+.-]*:/i.test(text) && !/^https?:\/\//i.test(text)) return;
+  const { url } = resolveFile(text, attrs, rootId);
+  const parsed = URL.parse(url);
+  if (!parsed || parsed.username || parsed.password) return;
+  return { type: 'uri', id: url, url, label: 'template' };
 }
 
 interface TableWalk {
@@ -383,6 +500,14 @@ function parseTable(
   };
   if (!nesting.isRoot) walk.nested.push(table);
   const columns = new Set<string>();
+  let noteTargets: Set<string> | undefined;
+  const noteContext = {
+    registryTarget(target: string) {
+      if (scrubEmails(target) !== target) return;
+      noteTargets ??= new Set();
+      noteTargets.add(target);
+    },
+  };
 
   for (const child of childrenOf(node, 'registry')) {
     const tag = tagOf(child);
@@ -419,7 +544,7 @@ function parseTable(
       }
       case 'note':
       case 'footnote': {
-        const note = parseNote(child, tag);
+        const note = parseNote(child, tag, noteContext);
         if (note) table.notes.push(note);
         break;
       }
@@ -429,7 +554,7 @@ function parseTable(
         break;
       }
       case 'record':
-        table.records.push(parseRecord(child, columns));
+        table.records.push(parseRecord(child, columns, walk.rootId));
         break;
       case 'registry':
         parseTable(
@@ -449,6 +574,7 @@ function parseTable(
     }
   }
   table.columns = [...columns];
+  if (noteTargets) table.noteRegistryTargets = [...noteTargets];
   return table;
 }
 

@@ -131,13 +131,21 @@ export function url(href: string): string {
   return `<${encoded}>`;
 }
 
-/** One list item per reference: id, type, section, label, and URL (when it differs from the id). */
-export function referenceLines(references: readonly ReferenceView[], indent = ''): string[] {
+/** One list item per reference. Generic record template pointers use their own URL as the link label. */
+export function referenceLines(
+  references: readonly ReferenceView[],
+  indent = '',
+  linkTemplateIds = false,
+): string[] {
   return references.map((ref) => {
     const section = ref.section ? ` §${inline(ref.section)}` : '';
     const label = ref.label ? ` — ${inline(ref.label)}` : '';
+    const id =
+      linkTemplateIds && ref.type === 'uri' && ref.label === 'template' && ref.url === ref.id
+        ? url(ref.id)
+        : inline(ref.id);
     const link = ref.url && ref.url !== ref.id ? ` ${url(ref.url)}` : '';
-    return `${indent}- ${inline(ref.id)} (${ref.type})${section}${label}${link}`;
+    return `${indent}- ${id} (${ref.type})${section}${label}${link}`;
   });
 }
 

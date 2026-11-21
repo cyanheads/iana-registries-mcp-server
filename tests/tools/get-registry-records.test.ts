@@ -863,7 +863,7 @@ describe('iana_get_registry_records: sub-registry selection', () => {
         { id: 'beta', title: 'Beta Values', record_count: 1 },
       ],
       notice:
-        'example-parameters holds no records. It nests 2 tables; call again with subregistry set to one of the listed ids.',
+        'example-parameters holds no records. Its notes point to example-other (try iana_get_registry_records with registry set to "example-other"). It nests 2 tables; call again with subregistry set to one of the listed ids.',
     });
     expect(out.structured).not.toHaveProperty('registry_notes');
   });
